@@ -8,7 +8,7 @@ from tqdm import tqdm  # For progress tracking
 import json
 
 from models.cnn import CustomCNN
-from utils import compute_prs, evaluate
+from project_root.utils.utils import compute_prs, evaluate
 from config import config
 
 def train():
