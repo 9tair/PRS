@@ -24,6 +24,31 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def save_model_checkpoint(model, optimizer, dataset_name, batch_size, metrics):
+    """Save trained model, optimizer state, and metadata."""
+    save_dir = os.path.join("models", "saved", f"{dataset_name}_batch_{batch_size}")
+    os.makedirs(save_dir, exist_ok=True)  # Create directory if not exists
+
+    # Save model
+    model_path = os.path.join(save_dir, "model.pth")
+    torch.save(model.state_dict(), model_path)
+
+    # Save optimizer state
+    optimizer_path = os.path.join(save_dir, "optimizer.pth")
+    torch.save(optimizer.state_dict(), optimizer_path)
+
+    # Save training configuration
+    config_path = os.path.join(save_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=4)
+
+    # Save training metrics
+    metrics_path = os.path.join(save_dir, "metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=4)
+
+    print(f"✅ Model and metadata saved in {save_dir}")
+
 def train():
     """Training loop over different datasets and batch sizes"""
     set_seed(config["seed"])
@@ -125,6 +150,9 @@ def train():
             metrics_path = os.path.join(config["results_save_path"], f"metrics1_{dataset_name}_batch_{batch_size}.json")
             with open(metrics_path, "w") as f:
                 json.dump(metrics, f)
+
+            # 🔹 Save model, optimizer, and training metadata
+            save_model_checkpoint(model, optimizer, dataset_name, batch_size, metrics)
 
 if __name__ == "__main__":
     train()
