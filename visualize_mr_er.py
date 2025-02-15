@@ -2,110 +2,95 @@ import os
 import json
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
+
 from config import config
 
-def load_major_regions(dataset_name, batch_size):
-    """Load saved major region (MR) and extra region (ER) data from JSON."""
+def load_major_region_data(dataset_name, batch_size):
+    """Load stored major region JSON data safely."""
     file_path = f"results/major_regions_{dataset_name}_batch_{batch_size}.json"
-
+    
     if not os.path.exists(file_path):
-        print(f"❌ File not found: {file_path}")
-        return None
-
-    with open(file_path, "r") as f:
-        data = json.load(f)
-
+        raise FileNotFoundError(f"File {file_path} not found.")
+    
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"❌ JSON Decode Error in {file_path}: {e}")
+        print(f"🛠️ Attempting to reload JSON with safe mode...")
+        return load_json_safely(file_path)
+    
     return data
 
-def process_mr_data(mr_data):
-    """
-    Extracts the number of samples per decision region for each class.
-    Returns structured data for stacked bar plotting.
-    """
-    class_ids = []
-    region_samples = []  # Each inner list is a class containing sample counts per region
-    max_regions = 0
+def load_json_safely(file_path):
+    """Try to read a potentially corrupted JSON file by trimming invalid content."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        json_content = f.read()
 
-    for class_name, class_data in mr_data.items():
-        class_id = int(class_name.split("_")[-1])  # Extract class index
-        regions = []
+    try:
+        data = json.loads(json_content)
+        return data
+    except json.JSONDecodeError:
+        print("⚠️ JSON is corrupted. Trying a manual fix...")
+        
+        # Attempt to fix missing end brackets
+        while json_content and json_content[-1] not in ["}", "]"]:
+            json_content = json_content[:-1]  # Trim last character
 
-        # Major Region samples
-        major_samples = len(class_data["major_region"]["samples"])
-        regions.append(major_samples)
+        try:
+            data = json.loads(json_content)
+            print("✅ Successfully recovered JSON after trimming invalid content.")
+            return data
+        except json.JSONDecodeError:
+            raise ValueError(f"❌ Unable to recover JSON file: {file_path}")
 
-        # Extra Region samples
-        for region in class_data["extra_regions"]:
-            regions.append(len(region["samples"]))
-
-        class_ids.append(class_id)
-        region_samples.append(regions)
-        max_regions = max(max_regions, len(regions))
-
-    return class_ids, region_samples, max_regions
-
-def plot_stacked_mr(dataset_name, batch_size):
-    """Generate a stacked bar chart of decision regions per class with better scaling."""
+def plot_mr_stacked_bar(dataset_name, batch_size):
+    """Generate a stacked bar plot for marginal and extra regions per class."""
     print(f"🔹 Loading major region data for {dataset_name}, batch size {batch_size}...")
-    mr_data = load_major_regions(dataset_name, batch_size)
+    data = load_major_region_data(dataset_name, batch_size)
 
-    if mr_data is None:
-        return
+    num_classes = 10  # Assuming CIFAR-10/MNIST-like dataset
+    class_sample_counts = np.zeros(num_classes)  # Total samples per class
+    region_counts = [[] for _ in range(num_classes)]  # Store sorted region sizes
 
-    class_ids, region_samples, max_regions = process_mr_data(mr_data)
+    for class_id in range(num_classes):
+        class_key = f"class_{class_id}"
+        if class_key not in data:
+            continue
 
-    # Sort classes for better visualization
-    sorted_indices = np.argsort(class_ids)
-    class_ids = np.array(class_ids)[sorted_indices]
-    region_samples = [region_samples[i] for i in sorted_indices]
+        # Get region samples and sort them by size (largest first)
+        major_region_samples = len(data[class_key]["major_region"]["samples"])
+        extra_region_samples = [len(region["samples"]) for region in data[class_key]["extra_regions"]]
+        
+        sorted_regions = [major_region_samples] + sorted(extra_region_samples, reverse=True)  # Largest first
 
-    # **🔥 Fix: Limit the figure size to prevent huge images**
-    num_classes = len(class_ids)
-    fig_height = min(8 + (num_classes * 0.3), 20)  # Adaptive figure height
-    fig_width = max(10, num_classes * 0.5)  # Adaptive figure width
+        class_sample_counts[class_id] = sum(sorted_regions)  # Total samples for the class
+        region_counts[class_id] = sorted_regions  # Store ordered region sizes
+    
+    # Stacked bar plot
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    plt.figure(figsize=(fig_width, fig_height))
-    bottom = np.zeros(len(class_ids))
+    bottom = np.zeros(num_classes)  # Track bar height for stacking
+    for i in range(num_classes):
+        for j, count in enumerate(region_counts[i]):
+            ax.bar(i, count, bottom=bottom[i], color=plt.cm.tab20(j / 20), edgecolor="white", width=0.8)
+            bottom[i] += count  # Stack the regions
 
-    # **🎨 Fix: Use a colormap with limited distinct colors**
-    cmap = cm.get_cmap("tab20", max_regions)  # Use up to 20 colors
-    colors = [mcolors.to_rgba(cmap(i)) for i in range(max_regions)]
+    # Labels
+    ax.set_xlabel("Class")
+    ax.set_ylabel("Number of Samples")
+    ax.set_xticks(range(num_classes))
+    ax.set_xticklabels([f"{c}\n({len(region_counts[c])} regions)" for c in range(num_classes)])  # Add region count
+    ax.set_title(f"Stacked Marginal and Extra Regions - {dataset_name}, Batch {batch_size}")
 
-    # **📏 Fix: Handle too many regions**
-    region_cutoff = 15  # If more than this, group small ones
-    other_region_count = np.zeros(len(class_ids))
-
-    for region_idx in range(max_regions):
-        region_counts = [regions[region_idx] if region_idx < len(regions) else 0 for regions in region_samples]
-
-        if region_idx < region_cutoff:
-            plt.bar(class_ids, region_counts, bottom=bottom, color=colors[region_idx], label=f"Region {region_idx+1}")
-        else:
-            other_region_count += np.array(region_counts)
-
-        bottom += np.array(region_counts)
-
-    # Add "Other Regions" if many small ones exist
-    if max_regions > region_cutoff:
-        plt.bar(class_ids, other_region_count, bottom=bottom, color="gray", label="Other Regions")
-
-    plt.xlabel("Class")
-    plt.ylabel("Number of Samples")
-    plt.xticks(class_ids, [f"Class {c}" for c in class_ids])
-    plt.title(f"Decision Regions per Class - {dataset_name} (Batch {batch_size})")
-    plt.legend(title="Decision Regions", bbox_to_anchor=(1.05, 1), loc="upper left")
-    plt.grid(axis="y", linestyle="--", alpha=0.7)
-
-    # **🔥 Fix: Handle large saving issues**
-    save_path = f"results/mr_region_visualization_{dataset_name}_batch_{batch_size}.png"
-    plt.savefig(save_path, bbox_inches="tight", dpi=150)  # Limit DPI to avoid oversized images
+    # Save & show
+    save_path = f"results/mr_visualization_{dataset_name}_batch_{batch_size}.png"
+    plt.savefig(save_path, bbox_inches="tight")
     plt.show()
 
-    print(f"✅ Visualization saved to: {save_path}")
+    print(f"✅ Plot saved to {save_path}")
 
 if __name__ == "__main__":
-    for dataset in config["datasets"]:
-        for batch_size in config["batch_sizes"]:
-            plot_stacked_mr(dataset, batch_size)
+    dataset = "CIFAR10"  # Change as needed
+    batch_size = 128  # Change as needed
+    plot_mr_stacked_bar(dataset, batch_size)
