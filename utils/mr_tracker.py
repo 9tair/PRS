@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import json
 import os
 
@@ -7,7 +8,7 @@ def compute_major_regions(activations, labels, num_classes):
     Computes the Major Region (MR), Extra Regions (ER), and MRV (Major Region Vector) for each class.
 
     Args:
-        activations (numpy.ndarray): Binary activation patterns of shape (num_samples, num_features).
+        activations (numpy.ndarray): Activation patterns of shape (num_samples, num_features).
         labels (numpy.ndarray): Ground-truth class labels of shape (num_samples,).
         num_classes (int): Number of classes.
 
@@ -38,34 +39,55 @@ def compute_major_regions(activations, labels, num_classes):
         major_pattern, major_samples = sorted_patterns[0]
 
         # Extra regions = all other patterns
-        extra_regions = [{"activation_pattern": k, "samples": v} for k, v in sorted_patterns[1:]]
+        extra_regions = [{"activation_pattern": list(k), "samples": v} for k, v in sorted_patterns[1:]]
 
         # Compute Mean Vector for Major Region (MRV)
         major_indices = np.array(major_samples)
-        mrv = activations[major_indices].mean(axis=0).tolist()
+        mrv = activations[major_indices].astype(np.float32).mean(axis=0).tolist()  # 🔹 Ensure float32
 
         results[f"class_{c}"] = {
-            "major_region": {"activation_pattern": major_pattern, "samples": major_samples},
+            "major_region": {"activation_pattern": list(major_pattern), "samples": major_samples},
             "extra_regions": extra_regions,
             "mrv": mrv
         }
 
     return results
 
-def save_major_regions(results, dataset_name, batch_size, output_dir="results/"):
-    """
-    Saves computed MR, ER, and MRV in a structured JSON file.
 
-    Args:
-        results (dict): MR & ER results computed from activations.
-        dataset_name (str): Dataset name.
-        batch_size (int): Batch size.
-        output_dir (str): Directory where to save the results.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"major_regions_{dataset_name}_batch_{batch_size}.json")
+def convert_to_serializable(obj):
+    """Convert NumPy/PyTorch objects into JSON-friendly Python types."""
+    if isinstance(obj, np.ndarray):
+        return obj.astype(np.float32).tolist()  # 🔹 Convert NumPy arrays to float32 lists
+    elif isinstance(obj, torch.Tensor):
+        return obj.cpu().numpy().astype(np.float32).tolist()  # 🔹 Convert Tensors to float32 lists
+    elif isinstance(obj, (np.float16, np.float32, np.float64)):  
+        return float(obj)  # 🔹 Convert NumPy floats to Python float
+    elif isinstance(obj, (np.int16, np.int32, np.int64)):  
+        return int(obj)  # 🔹 Convert NumPy int to Python int
+    elif isinstance(obj, tuple):  
+        return list(obj)  # 🔹 Convert tuples to lists (JSON does not support tuples)
+    elif isinstance(obj, dict):
+        return {str(k): convert_to_serializable(v) for k, v in obj.items()}  # 🔹 Ensure dict keys are strings
+    elif isinstance(obj, list):
+        return [convert_to_serializable(i) for i in obj]  # 🔹 Convert list elements recursively
+    else:
+        return obj  # Return unchanged for Python-native types
 
-    with open(output_path, "w") as f:
+
+def save_major_regions(major_regions, dataset_name, batch_size):
+    """Save the major regions and associated samples in a JSON file."""
+    save_path = f"results/major_regions_{dataset_name}_batch_{batch_size}.json"
+
+    print(f"✅ Preparing Major Regions for saving: {save_path}")
+
+    results = convert_to_serializable(major_regions)
+
+    # 🔹 Debugging: Check data structure before saving
+    print(f"🔹 Processed Data Structure (first class entry): {list(results.keys())[:1]}")
+    print(f"🔹 Example data: {results[list(results.keys())[0]] if results else 'Empty'}")
+
+    # Save to JSON
+    with open(save_path, "w") as f:
         json.dump(results, f, indent=4)
 
-    print(f"Major Region Data Saved: {output_path}")
+    print(f"✅ Major regions saved successfully to {save_path}")

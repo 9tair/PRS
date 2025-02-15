@@ -10,8 +10,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm  
 
 # Import refactored utility functions
-from models import CustomCNN, get_model
+from models import get_model
 from utils import get_datasets, evaluate, compute_unique_activations, register_activation_hook
+from utils import compute_major_regions, save_major_regions
 from config import config
 
 # Function to set the seed for reproducibility
@@ -53,7 +54,8 @@ def train():
             scaler = torch.amp.GradScaler("cuda")
 
             metrics = {"epoch": [], "train_accuracy": [], "test_accuracy": [], "prs_ratios": []}
-            epoch_activations = {}
+            epoch_activations = []
+            epoch_labels = []
 
             # Register Hook
             activations = {"penultimate": []}
@@ -65,6 +67,7 @@ def train():
                 correct_train = 0
                 total_train = 0
                 activations["penultimate"].clear()
+                batch_labels = []
 
                 for inputs, labels in train_loader:
                     inputs, labels = inputs.to(config["device"]), labels.to(config["device"])
@@ -77,25 +80,28 @@ def train():
                         loss = criterion(outputs, labels)
 
                     scaler.scale(loss).backward()
-
-                    # 🚀 **Apply Gradient Clipping**
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
                     scaler.step(optimizer)
                     scaler.update()
+                    
+                    # 🔹 Fix float16 issue: Convert activations to float32 immediately
+                    activations["penultimate"] = [act.astype(np.float32) for act in activations["penultimate"]]
 
                     epoch_loss += loss.item()
+
+                    # Store labels
+                    batch_labels.append(labels.cpu().numpy())
 
                     # Calculate training accuracy
                     _, predicted = outputs.max(1)
                     correct_train += (predicted == labels).sum().item()
                     total_train += labels.size(0)
 
-                # Collect epoch activations
-                epoch_activations[f"epoch_{epoch+1}"] = np.concatenate(activations["penultimate"], axis=0)
+                # Collect epoch activations & labels
+                epoch_activations.append(np.concatenate(activations["penultimate"], axis=0))
+                epoch_labels.append(np.concatenate(batch_labels, axis=0))
 
                 # Compute PRS Ratio
-                prs_ratio = compute_unique_activations(epoch_activations[f"epoch_{epoch+1}"]) / len(train_dataset)
+                prs_ratio = compute_unique_activations(epoch_activations[-1]) / len(train_dataset)
                 metrics["prs_ratios"].append(prs_ratio)
 
                 # Evaluate on Test Set
@@ -111,8 +117,12 @@ def train():
 
             hook_handle.remove()
 
+            # Compute and Save MR/ER/MRV
+            major_regions = compute_major_regions(np.vstack(epoch_activations), np.hstack(epoch_labels), num_classes=10)
+            save_major_regions(major_regions, dataset_name, batch_size)
+
             results[f"{dataset_name}_batch_{batch_size}"] = metrics
-            metrics_path = os.path.join(config["results_save_path"], f"metrics_{dataset_name}_batch_{batch_size}.json")
+            metrics_path = os.path.join(config["results_save_path"], f"metrics1_{dataset_name}_batch_{batch_size}.json")
             with open(metrics_path, "w") as f:
                 json.dump(metrics, f)
 
