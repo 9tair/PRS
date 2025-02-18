@@ -1,0 +1,18 @@
+{
+    "models": [
+        "CNN-6"
+    ],
+    "datasets": [
+        "CIFAR10"
+    ],
+    "batch_sizes": [
+        128
+    ],
+    "epochs": 300,
+    "learning_rate": 0.001,
+    "model_save_path": "models/",
+    "results_save_path": "results/",
+    "device": "cuda:3",
+    "seed": 375,
+    "test_batch_size": 256
+}

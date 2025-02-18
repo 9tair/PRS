@@ -28,9 +28,9 @@
 
 
 config = {
-    "model": ["CNN-6"],  # Iterate through all model architectures
-    "datasets": ["CIFAR10", "F-MNIST", "MNIST"],  # Iterate through all datasets
-    "batch_sizes": [64],  # Iterate through multiple batch sizes
+    "models": ["CNN-6"],  # Iterate through all model architectures
+    "datasets": ["F-MNIST"],  # Iterate through all datasets
+    "batch_sizes": [128, 2048],  # Iterate through multiple batch sizes
     "epochs": 1,  # Set to the required number of epochs
     "learning_rate": 1e-3,  # Learning rate for the optimizer
     "model_save_path": "models/",  # Directory to save trained models

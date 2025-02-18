@@ -1,0 +1,14 @@
+{
+    "epoch": [
+        1
+    ],
+    "train_accuracy": [
+        77.38
+    ],
+    "test_accuracy": [
+        82.93
+    ],
+    "prs_ratios": [
+        0.7235333333333334
+    ]
+}
