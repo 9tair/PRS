@@ -1,4 +1,0 @@
-2025-02-18 16:33:47,794 - INFO - CNN-6_F-MNIST_batch_128 - 🚀 Starting Training | Model: CNN-6 | Dataset: F-MNIST | Batch Size: 128
-2025-02-18 16:33:48,734 - INFO - CNN-6_F-MNIST_batch_128 - ✅ Activation hook registered for CNN-6 on F-MNIST (Batch: 128)
-2025-02-18 16:33:48,735 - INFO - CNN-6_F-MNIST_batch_128 - 📢 Epoch 1/1 | Model: CNN-6 | Dataset: F-MNIST
-2025-02-18 16:34:08,043 - INFO - CNN-6_F-MNIST_batch_128 - ✅ Epoch 1/1 | Loss: 281.0755 | Train Acc: 77.38%

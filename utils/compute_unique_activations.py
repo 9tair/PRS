@@ -1,33 +1,33 @@
-from utils.logger import global_logger  # Import from logger.py to avoid circular import
-logger = global_logger  # Use the global logger
-
+from utils.logger import setup_logger  # Import dynamic logger
 import numpy as np
 
-def compute_unique_activations(activations):
+def compute_unique_activations(activations, logger):
     """
     Compute the number of unique activation patterns for the stored activations of the penultimate layer.
 
     Args:
         activations (numpy.ndarray): Activation maps retrieved from the penultimate layer.
-    
+        logger: Logger instance for tracking logs.
+
     Returns:
         int: Number of unique activation patterns.
     """
     if activations is None or len(activations) == 0:
-        logger.warning("No activations received in compute_unique_activations. Returning 0.")
+        logger.warning("⚠️ No activations received in compute_unique_activations. Returning 0.")
         return 0
 
-    logger.info(f"Computing unique activation patterns for {activations.shape[0]} samples...")
+    num_samples = activations.shape[0]
+    logger.info(f"🔎 Computing unique activation patterns for {num_samples} samples...")
 
-    decision_regions = set()   
+    decision_regions = set()  # Store unique activation patterns   
     
     # Compute binary activation patterns (sign-based)
     signs = np.sign(activations)
-    signs[signs == 0] = -1  
+    signs[signs == 0] = -1  # Convert zeroes to -1 to maintain consistency
 
     # Debugging: Show the first few activation patterns
-    logger.debug(f"First 5 activation rows (before binarization):\n{activations[:5]}")
-    logger.debug(f"First 5 binarized patterns:\n{signs[:5]}")
+    logger.debug(f"First activation row (before binarization):\n{activations[0]}")
+    logger.debug(f"First binarized pattern:\n{signs[0]}")
 
     # Convert each row into a tuple for uniqueness tracking
     for row in signs:

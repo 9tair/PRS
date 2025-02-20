@@ -1,6 +1,4 @@
-from utils.logger import global_logger  # Import from logger.py to avoid circular import
-logger = global_logger  # Use the global logger
-
+from utils.logger import setup_logger  # Import dynamic logger
 import numpy as np
 import torch
 import json
@@ -8,7 +6,7 @@ import os
 from collections import defaultdict
 
 
-def compute_major_regions(activations, labels, num_classes):
+def compute_major_regions(activations, labels, num_classes, logger):
     """
     Computes Major Region (MR) and Extra Regions (ER) for each class efficiently.
 
@@ -16,16 +14,19 @@ def compute_major_regions(activations, labels, num_classes):
         activations (numpy.ndarray): Activation patterns of shape (num_samples, num_features).
         labels (numpy.ndarray): Ground-truth class labels of shape (num_samples,).
         num_classes (int): Number of classes.
+        model_name (str): Model identifier.
+        dataset_name (str): Dataset name.
+        batch_size (int): Training batch size.
 
     Returns:
         dict: Dictionary containing MR, ER, and summary statistics per class.
         dict: Dictionary mapping unique activation patterns to sample indices.
     """
 
-    logger.info(f"Activations shape: {activations.shape}")  # Logs the shape of activations
-    logger.info(f"Labels shape: {labels.shape}")  # Logs the shape of labels
-    logger.info(f"Number of classes: {num_classes}")  # Logs the number of classes
-    
+    logger.info(f"Activations shape: {activations.shape}")
+    logger.info(f"Labels shape: {labels.shape}")
+    logger.info(f"Number of classes: {num_classes}")
+
     class_patterns = {c: defaultdict(int) for c in range(num_classes)}  # Track activation pattern counts
     unique_patterns = {}  # Stores activation patterns and their associated samples
     pattern_index_map = {}  # Maps activation pattern tuples to unique indices
@@ -54,7 +55,7 @@ def compute_major_regions(activations, labels, num_classes):
                 "samples": []
             }
             pattern_counter += 1
-        
+
         unique_patterns[pattern_index_map[pattern_tuple]]["samples"].append(idx)
         class_patterns[label][pattern_index_map[pattern_tuple]] += 1  # Increment count
 
@@ -97,11 +98,11 @@ def compute_major_regions(activations, labels, num_classes):
     return results, unique_patterns
 
 
-def save_major_regions(major_regions, unique_patterns, dataset_name, batch_size, model_name):
+def save_major_regions(major_regions, unique_patterns, dataset_name, batch_size, model_name, logger):
     """Save major region statistics in a compressed format, including model name.
         Saves two files: one with statistics, and one with activation pattern mappings.
     """
-    
+
     # Define save paths
     region_save_path = f"results/major_regions_{model_name}_{dataset_name}_batch_{batch_size}.json"
     pattern_save_path = f"results/activation_patterns_{model_name}_{dataset_name}_batch_{batch_size}.json"

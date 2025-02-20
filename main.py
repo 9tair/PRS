@@ -1,13 +1,14 @@
 import logging
-from utils.logger import global_logger  # Import from logger.py to avoid circular import
-
+import sys
+from utils.logger import setup_logger  
 from train import train
 
 if __name__ == "__main__":
-    logger = global_logger  # Use the global logger
+    logger = setup_logger("MAIN", "ALL", "NA")  # Main logger for general errors
 
     try:
         logger.info("Starting training...")
+        logger.info(f"Python Version: {sys.version}")
         train()
         logger.info("Training completed successfully.")
     except Exception as e:
