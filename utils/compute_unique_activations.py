@@ -12,12 +12,15 @@ def compute_unique_activations(activations, logger):
     Returns:
         int: Number of unique activation patterns.
     """
+    logger.info(f"Received activations shape: {activations.shape}")
+
     if activations is None or len(activations) == 0:
-        logger.warning("⚠️ No activations received in compute_unique_activations. Returning 0.")
+        logger.warning("No activations received in compute_unique_activations. Returning 0.")
         return 0
 
-    num_samples = activations.shape[0]
-    logger.info(f"🔎 Computing unique activation patterns for {num_samples} samples...")
+    num_samples, num_activations = activations.shape
+    logger.info(f"Computing unique activation patterns for {num_samples} samples...")
+    logger.info(f"Each sample has {num_activations} activations.")
 
     decision_regions = set()  # Store unique activation patterns   
     

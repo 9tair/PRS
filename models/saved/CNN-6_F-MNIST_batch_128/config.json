@@ -9,11 +9,14 @@
         128,
         2048
     ],
-    "epochs": 1,
+    "epochs": 300,
+    "warmup_epochs": 90,
     "learning_rate": 0.001,
     "model_save_path": "models/",
     "results_save_path": "results/",
-    "device": "cuda:3",
+    "device": "cuda:0",
     "seed": 375,
-    "test_batch_size": 256
+    "test_batch_size": 256,
+    "lambda_mrv": 0,
+    "lambda_hamming": 0
 }

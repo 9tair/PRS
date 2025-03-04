@@ -3,6 +3,23 @@ import matplotlib.pyplot as plt
 import os
 from config import config
 
+def replace_none_with_previous(lst):
+    """Replaces None values with the previous non-None value in the list."""
+    if not lst:
+        return []
+    
+    cleaned_list = []
+    prev_value = 0  # Default to 0 if the first value is None
+
+    for val in lst:
+        if val is None:
+            cleaned_list.append(prev_value)  # Use previous value
+        else:
+            cleaned_list.append(val)
+            prev_value = val  # Update previous value
+
+    return cleaned_list
+
 def visualize_single_metric(filename):
     """Visualizes metrics from a specific JSON file."""
     metrics_path = os.path.join(config['results_save_path'], filename)
@@ -13,12 +30,34 @@ def visualize_single_metric(filename):
 
     # Load results
     with open(metrics_path, "r") as f:
-        metrics = json.load(f)
+        try:
+            metrics = json.load(f)
+        except json.JSONDecodeError:
+            print(f"Error: Failed to parse JSON file {filename}. Please check the file format.")
+            return
 
+    # Check if necessary keys exist and contain valid data
+    required_keys = ["epoch", "train_accuracy", "test_accuracy", "prs_ratios"]
+    for key in required_keys:
+        if key not in metrics:
+            print(f"Error: Missing key '{key}' in {filename}.")
+            return
+        if metrics[key] is None:
+            print(f"Error: '{key}' is None in {filename}.")
+            return
+        if not isinstance(metrics[key], list):
+            print(f"Error: '{key}' is not a list in {filename}.")
+            return
+
+    # Extract values and replace None with the previous number
     epochs = metrics["epoch"]
-    train_accuracy = [acc / 100 for acc in metrics["train_accuracy"]]
-    test_accuracy = [acc / 100 for acc in metrics["test_accuracy"]]
-    prs_ratios = metrics["prs_ratios"]
+    train_accuracy = replace_none_with_previous(metrics["train_accuracy"])
+    test_accuracy = replace_none_with_previous(metrics["test_accuracy"])
+    prs_ratios = replace_none_with_previous(metrics["prs_ratios"])
+
+    # Normalize train and test accuracy
+    train_accuracy = [acc / 100 for acc in train_accuracy]
+    test_accuracy = [acc / 100 for acc in test_accuracy]
 
     # Extract dataset name and batch size from filename
     try:

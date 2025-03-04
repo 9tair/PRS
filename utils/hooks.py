@@ -1,17 +1,17 @@
-from utils.logger import setup_logger  # Import dynamic logger
 import torch.nn as nn
 import torch
 
 def register_activation_hook(model, activations, model_name, dataset_name, batch_size, logger):
     """
-    Register a hook on the penultimate layer to detect NaNs and log them.
+    Registers a forward hook on the correct penultimate layer for activation tracking.
 
     Args:
-        model (torch.nn.Module): Model to register the hook on.
+        model (torch.nn.Module): The model to register the hook on.
         activations (dict): Dictionary storing activations and a skip flag.
         model_name (str): Name of the model.
         dataset_name (str): Name of the dataset.
         batch_size (int): Training batch size.
+        logger: Logger instance.
 
     Returns:
         hook_handle: Hook reference for later removal.
@@ -19,33 +19,34 @@ def register_activation_hook(model, activations, model_name, dataset_name, batch
 
     def hook_fn(module, input, output):
         """Hook function to track activations and detect NaNs."""
-        if torch.isnan(output).any():  # Detect NaNs
-            msg = f"NaN detected | Model: {model_name} | Dataset: {dataset_name} | Batch Size: {batch_size}"
-            logger.warning(msg)
-            activations["skip_batch"] = True  # Flag to skip this batch
+        if torch.isnan(output).any():
+            logger.warning(f"NaN detected | Model: {model_name} | Dataset: {dataset_name} | Batch Size: {batch_size}")
+            activations["skip_batch"] = True  # 🚨 Skip batch if NaNs detected
 
-        activations["penultimate"].append(output.detach().cpu().numpy())
+        activations["penultimate"].append(output.detach())  # 🔹 Keep activations in torch format
 
-    activations["skip_batch"] = False  # Initialize flag
-
-    # Identify and register hook on the correct layer
+    activations["skip_batch"] = False  
     hook_handle = None
 
-    if hasattr(model, "classifier") and isinstance(model.classifier, nn.Sequential):  
-        penultimate_layer_index = len(model.classifier) - 2
-        hook_handle = model.classifier[penultimate_layer_index].register_forward_hook(hook_fn)
-        logger.info(f"Hook registered on classifier layer {penultimate_layer_index}.")
+    if model_name == "VGG16":
+        # 🔹 Correctly register the hook on the **penultimate fully connected layer**
+        layer_index = 3  # classifier[5] = ReLU before final FC layer
+        hook_handle = model.classifier[layer_index].register_forward_hook(hook_fn)
+        logger.info(f"Hook registered on VGG16 classifier[{layer_index}] (penultimate FC).")
 
-    elif hasattr(model, "fc"):  
-        if isinstance(model.fc, nn.Sequential):
-            penultimate_layer_index = len(model.fc) - 2
-            hook_handle = model.fc[penultimate_layer_index].register_forward_hook(hook_fn)
-        else:
-            hook_handle = model.fc.register_forward_hook(hook_fn)
-        logger.info(f"Hook registered on fully connected (fc) layer.")
+    elif model_name == "ResNet18":
+        # Previously, hook was placed on model.fc (incorrect)
+        # Now, correctly placing the hook on the last **residual block before global average pooling**
+        hook_handle = model.layer4[-1].register_forward_hook(hook_fn)
+        logger.info("Hook registered on ResNet18 layer4[-1] (penultimate layer before GAP).")
+
+    elif model_name == "CNN-6":
+        # Register the hook on the second-to-last layer of the classifier
+        hook_handle = model.classifier[-2].register_forward_hook(hook_fn)
+        logger.info("Hook registered on CNN-6 penultimate FC.")
 
     else:
-        logger.error("Hook registration failed: Model structure unknown.")
+        logger.error(f"Hook registration failed: Unknown model structure {model_name}.")
         raise ValueError("Hook could not be registered. Model structure unknown.")
 
     return hook_handle
