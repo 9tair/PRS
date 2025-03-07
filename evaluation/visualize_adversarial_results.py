@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Constants
-RESULTS_PATH = "results/adversarial_results.json"
-SAVE_PATH = "results/adversarial_results_plot.png"
+RESULTS_PATH = "results/adversarial_results_new.json"
+SAVE_PATH = "results/adversarial_results_plot_new.png"
 
 # Define colors and styles dynamically
 COLOR_PALETTE = {"Simple": "darkorange", "PRS": "royalblue"}
@@ -15,7 +15,7 @@ MARKERS = {"Train": "o", "Test": "s"}
 def load_results():
     """Loads the adversarial robustness results from JSON file."""
     if not os.path.exists(RESULTS_PATH):
-        raise FileNotFoundError(f"❌ Results file not found: {RESULTS_PATH}")
+        raise FileNotFoundError(f"Results file not found: {RESULTS_PATH}")
 
     with open(RESULTS_PATH, "r") as f:
         results = json.load(f)
@@ -111,7 +111,7 @@ def plot_adversarial_results(results):
     plt.savefig(SAVE_PATH, dpi=300)
     plt.show()
 
-    print(f"\n📊 Plot saved to: {SAVE_PATH}")
+    print(f"\nPlot saved to: {SAVE_PATH}")
 
 def main():
     """Main function to load results and generate visualization."""

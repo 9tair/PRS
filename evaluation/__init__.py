@@ -1,4 +1,8 @@
 """
-Evaluation scripts for robustness analysis.
+Adversarial Robustness Evaluation Package
 """
-# No imports needed, but adding __init__.py makes "evaluation" a valid module.
+from .evaluate_robustness import evaluate_robustness
+
+__all__ = [
+    'evaluate_robustness',
+]

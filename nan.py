@@ -28,7 +28,7 @@ def set_seed(seed):
 
 def save_model_checkpoint(model, optimizer, scheduler, modelname, dataset_name, batch_size, metrics, logger):
     """Save trained model, optimizer state, and metadata."""
-    save_dir = os.path.join("models", "saved", f"{modelname}_{dataset_name}_batch_{batch_size}")
+    save_dir = os.path.join("models", "saved", f"{modelname}_{dataset_name}_batch_{batch_size}_NAN")
     os.makedirs(save_dir, exist_ok=True)
 
     torch.save(model.state_dict(), os.path.join(save_dir, "model.pth"))
@@ -225,8 +225,6 @@ def train():
                 os.makedirs(results_save_path, exist_ok=True)
 
                 results[f"{dataset_name}_batch_{batch_size}"] = metrics
-                with open(os.path.join(results_save_path, f"metrics_{modelname}_{dataset_name}_batch_{batch_size}.json"), "w") as f:
-                    json.dump(metrics, f, indent=4)
 
                 save_model_checkpoint(model, optimizer, scheduler, modelname, dataset_name, batch_size, metrics, logger)
 

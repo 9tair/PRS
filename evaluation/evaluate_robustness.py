@@ -81,7 +81,7 @@ def main():
 
     # Save results to JSON
     os.makedirs("results", exist_ok=True)
-    results_path = "results/adversarial_results.json"
+    results_path = "results/adversarial_results_new.json"
 
     with open(results_path, "w") as f:
         json.dump(results, f, indent=4)

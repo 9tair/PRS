@@ -94,13 +94,13 @@ def train():
 
                         if activations["skip_batch"]:
                             logger.warning(f"Skipping NaN batch | Epoch: {epoch+1} | Batch: {batch_idx}")
-                            continue  # 🚨 Skip backprop entirely
+                            continue  # Skip backprop entirely
 
                         scaler.scale(loss).backward()
 
                         if any(torch.isnan(param.grad).any() for param in model.parameters()):
                             logger.warning(f"NaN detected in gradients. Skipping update | Epoch: {epoch+1} | Batch: {batch_idx}")
-                            continue  # 🚨 Skip optimizer step
+                            continue  # Skip optimizer step
 
                         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
 
@@ -145,8 +145,6 @@ def train():
                 os.makedirs(results_save_path, exist_ok=True)
 
                 results[f"{dataset_name}_batch_{batch_size}"] = metrics
-                with open(os.path.join(results_save_path, f"metrics_{modelname}_{dataset_name}_batch_{batch_size}.json"), "w") as f:
-                    json.dump(metrics, f, indent=4)
 
                 save_model_checkpoint(model, optimizer, modelname, dataset_name, batch_size, metrics, logger)
 

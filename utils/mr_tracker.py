@@ -108,9 +108,14 @@ def save_major_regions(major_regions, unique_patterns, dataset_name, batch_size,
         prs_enabled (bool): Whether PRS regularization was used.
     """
     # Modify file paths based on PRS flag
-    suffix = "_warmup_{warmup_epochs}_PRS" if prs_enabled else ""
-    region_save_path = f"results/major_regions_{model_name}_{dataset_name}_batch_{batch_size}{suffix}.json"
-    pattern_save_path = f"results/activation_patterns_{model_name}_{dataset_name}_batch_{batch_size}{suffix}.json"
+    suffix = f"_warmup_{warmup_epochs}_PRS" if prs_enabled else ""
+    save_dir = f"models/saved/{model_name}_{dataset_name}_batch_{batch_size}{suffix}"
+    
+    # Ensure directory exists
+    os.makedirs(save_dir, exist_ok=True)
+
+    region_save_path = os.path.join(save_dir, "major_regions.json")
+    pattern_save_path = os.path.join(save_dir, "activation_patterns.json")
 
     def convert_to_serializable(obj):
         if isinstance(obj, (np.ndarray, torch.Tensor)):  
