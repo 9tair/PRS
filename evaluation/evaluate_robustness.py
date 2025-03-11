@@ -1,13 +1,21 @@
+import sys
 import os
+
+# Add project root to Python path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(script_dir, ".."))
+sys.path.append(project_root)
+
 import json
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
-from config import config
 
+# Import with correct paths for your project structure
+from config import config
 from utils import fgsm_attack, bim_attack, pgd_attack, get_datasets
-from models import load_trained_model
+from models.model_factory import get_model  # Assuming this is the correct path based on error
 
 # Define attack configurations with multiple perturbations
 EPSILONS = [0.0, 0.0313, 0.05, 0.1]  # Different epsilon values for robustness analysis
@@ -43,15 +51,91 @@ def evaluate_robustness(model, data_loader, attack_fn, attack_params, epsilon, d
 
     return correct / total * 100  # Return accuracy as percentage
 
+def extract_model_info(folder_path):
+    """
+    Extract model parameters from folder path.
+    Example path: /home/tair/project_root/models/saved/VGG16_CIFAR10_batch_128_warmup_50_PRS
+    """
+    basename = os.path.basename(folder_path)
+    parts = basename.split('_')
+    
+    # Extract basic information
+    model_name = parts[0]  # e.g., 'VGG16'
+    dataset_name = parts[1]  # e.g., 'CIFAR10'
+    
+    # Look for batch size
+    batch_size = None
+    for i, part in enumerate(parts):
+        if part == "batch" and i + 1 < len(parts):
+            batch_size = int(parts[i + 1])
+            break
+    
+    if batch_size is None:
+        raise ValueError(f"Could not extract batch size from folder name: {basename}")
+    
+    # Check for PRS and warmup
+    prs_enabled = "PRS" in basename
+    warmup_epochs = 50  # default
+    
+    for i, part in enumerate(parts):
+        if part == "warmup" and i + 1 < len(parts):
+            warmup_epochs = int(parts[i + 1])
+            break
+    
+    return model_name, dataset_name, batch_size, prs_enabled, warmup_epochs
+
+# Custom function to load model directly from complete path
+def load_model_from_folder(folder_path, device="cuda"):
+    """
+    Load model directly from the provided folder path.
+    
+    Args:
+        folder_path (str): Path to folder containing model.pth
+        device (str): Device to load model on
+    
+    Returns:
+        torch.nn.Module: Loaded model
+    """
+    model_path = os.path.join(folder_path, "model.pth")
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+    
+    # Extract model info to determine architecture
+    model_name, _, _, _, _ = extract_model_info(folder_path)
+    
+    # Initialize model architecture
+    model = get_model(model_name, input_channels=3)
+    
+    # Load the weights
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device)
+    model.eval()
+    
+    print(f"Loaded trained model from {model_path}")
+    return model
 
 def main():
     """Main function to evaluate adversarial robustness of trained models."""
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    import argparse
+    parser = argparse.ArgumentParser(description="Evaluate adversarial robustness of trained models.")
+    parser.add_argument("--folder1", type=str, required=True, help="Path to the first model folder.")
+    parser.add_argument("--folder2", type=str, required=True, help="Path to the second model folder.")
+    args = parser.parse_args()
 
-    # Load Trained Models
+    device = config["device"] if torch.cuda.is_available() else "cpu"
+    
+    # Extract model parameters from folder paths (for debugging/info)
+    model1_info = extract_model_info(args.folder1)
+    model2_info = extract_model_info(args.folder2)
+    
+    print(f"Model 1 info: {model1_info}")
+    print(f"Model 2 info: {model2_info}")
+
+    # Load trained models directly from the provided paths
     models_to_evaluate = {
-        "Simple (Batch_128)": load_trained_model("CNN-6", "CIFAR10", batch_size=128, device=device, prs_enabled=False, warmup_epochs=config["warmup_epochs"]),
-        "PRS (Batch_128)": load_trained_model("CNN-6", "CIFAR10", batch_size=128, device=device, prs_enabled=True, warmup_epochs=config["warmup_epochs"]),
+        "Model 1": load_model_from_folder(args.folder1, device),
+        "Model 2": load_model_from_folder(args.folder2, device),
     }
 
     # Load CIFAR-10 Training & Test Dataset
@@ -73,15 +157,15 @@ def main():
                 train_acc = evaluate_robustness(model, train_loader, attack_data["attack_fn"], attack_data["params"], epsilon, device)
                 test_acc = evaluate_robustness(model, test_loader, attack_data["attack_fn"], attack_data["params"], epsilon, device)
 
-                results[model_name][attack_name]["Train"][epsilon] = train_acc
-                results[model_name][attack_name]["Test"][epsilon] = test_acc
+                results[model_name][attack_name]["Train"][str(epsilon)] = train_acc
+                results[model_name][attack_name]["Test"][str(epsilon)] = test_acc
 
                 print(f"{attack_name} Train Acc ({model_name}) at ε={epsilon}: {train_acc:.2f}%")
                 print(f"{attack_name} Test Acc ({model_name}) at ε={epsilon}: {test_acc:.2f}%")
 
     # Save results to JSON
-    os.makedirs("results", exist_ok=True)
-    results_path = "results/adversarial_results_new.json"
+    os.makedirs(config["results_save_path"], exist_ok=True)
+    results_path = os.path.join(config["results_save_path"], "adversarial_results_cnn.json")
 
     with open(results_path, "w") as f:
         json.dump(results, f, indent=4)

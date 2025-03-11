@@ -63,3 +63,41 @@ def compute_hamming_loss(activations, labels, major_regions):
             loss += hamming_dist
 
     return loss / num_samples  # Normalize by batch size
+
+def compute_rrv_loss(activations, labels, major_regions):
+    """
+    Computes the Relaxed Region Vector (RRV) Loss.
+
+    Args:
+        activations (torch.Tensor): Model activations (batch_size, feature_dim).
+        labels (torch.Tensor): True class labels (batch_size).
+        major_regions (dict): Precomputed major region activations per class.
+
+    Returns:
+        torch.Tensor: RRV loss.
+    """
+    device = activations.device
+    loss = 0.0
+    
+    # Ensure correct batch size handling
+    num_samples = min(activations.shape[0], labels.shape[0])
+
+    # Preload RRV and RDR mask as tensors
+    precomputed_rrv = {class_id: torch.tensor(mr["rrv"], device=device) 
+                        for class_id, mr in major_regions.items()}
+    precomputed_rdr_mask = {class_id: torch.tensor(mr["rdr_mask"], device=device) 
+                            for class_id, mr in major_regions.items()}
+
+    for i in range(num_samples):
+        class_id = labels[i].item()
+        if class_id in precomputed_rrv and class_id in precomputed_rdr_mask:
+            rrv = precomputed_rrv[class_id]
+            rdr_mask = precomputed_rdr_mask[class_id]
+            
+            # Apply the RDR mask to the activations
+            masked_activations = activations[i] * rdr_mask
+            
+            # Compute MSE loss only on the masked coordinates
+            loss += F.mse_loss(masked_activations, rrv)
+
+    return loss / num_samples  # Normalize by batch size

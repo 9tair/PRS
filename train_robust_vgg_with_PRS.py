@@ -1,6 +1,4 @@
 import os
-import json
-import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -13,94 +11,12 @@ from tqdm import tqdm
 from models import get_model
 from utils import (
     get_datasets, evaluate, compute_unique_activations, 
-    register_activation_hook, compute_major_regions, save_major_regions
+    register_activation_hook, compute_major_regions, save_major_regions,
+    save_model_checkpoint, set_seed, freeze_final_layer, initialize_weights
 )
 from utils.logger import setup_logger
 from utils.regularization import compute_mrv_loss, compute_hamming_loss
 from config import config
-
-
-def set_seed(seed):
-    """Ensure reproducibility by setting seeds for all randomness sources."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def save_model_checkpoint(model, optimizer, scheduler, modelname, dataset_name, batch_size, metrics, logger, prs_enabled):
-    """Save trained model with PRS metadata, including warmup_epochs in filename."""
-    warmup_epochs = config["warmup_epochs"]
-    save_dir = os.path.join(
-        "models", 
-        "saved", 
-        f"{modelname}_{dataset_name}_batch_{batch_size}_warmup_{warmup_epochs}{'_PRS' if prs_enabled else ''}"
-    )
-    os.makedirs(save_dir, exist_ok=True)
-
-    torch.save(model.state_dict(), os.path.join(save_dir, "model.pth"))
-    torch.save(optimizer.state_dict(), os.path.join(save_dir, "optimizer.pth"))
-    
-    if scheduler is not None:
-        torch.save(scheduler.state_dict(), os.path.join(save_dir, "scheduler.pth"))
-
-    with open(os.path.join(save_dir, "config.json"), "w") as f:
-        json.dump(config, f, indent=4)
-
-    with open(os.path.join(save_dir, "metrics.json"), "w") as f:
-        json.dump(metrics, f, indent=4)
-
-    logger.info(f"Model and metadata saved in {save_dir}")
-
-
-def initialize_weights(model):
-    """Apply improved weight initialization to model."""
-    for m in model.modules():
-        if isinstance(m, nn.Conv2d):
-            # Kaiming initialization for convolutional layers
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.BatchNorm2d):
-            # Standard initialization for batch normalization
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Linear):
-            # Xavier initialization for fully connected layers
-            nn.init.xavier_normal_(m.weight)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-    return model
-
-
-def freeze_final_layer(model, modelname, logger):
-    """Freeze the parameters of the final layer in the model."""
-    if 'resnet' in modelname.lower():
-        final_layer = model.fc
-    elif 'vgg' in modelname.lower():
-        final_layer = model.classifier[-1]
-    elif 'mobilenet' in modelname.lower():
-        final_layer = model.classifier
-    else:
-        try:
-            final_layer = model.fc
-        except AttributeError:
-            final_layer = None
-            for name, module in reversed(list(model.named_modules())):
-                if len(list(module.parameters())) > 0:
-                    final_layer = module
-                    logger.info(f"Identified final layer as: {name}")
-                    break
-    
-    if final_layer:
-        for param in final_layer.parameters():
-            param.requires_grad = False
-        logger.info(f"Frozen parameters of the final layer for {modelname}")
-    else:
-        logger.error(f"Could not find final layer to freeze for {modelname}")
-
 
 def train():
     """Enhanced training loop with warm-up, PRS regularization, and stability features."""
@@ -451,9 +367,11 @@ def train():
                 results[f"{dataset_name}_batch_{batch_size}"] = metrics
 
                 # Save final model checkpoint
+                
                 save_model_checkpoint(
-                    model, optimizer, scheduler, modelname, dataset_name, 
-                    batch_size, metrics, logger, prs_enabled=True
+                    model, optimizer, modelname, dataset_name, batch_size, 
+                    metrics, logger, scheduler=scheduler, prs_enabled=True, 
+                    config=config
                 )
 
     logger.info("Training Complete")

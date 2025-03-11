@@ -1,6 +1,3 @@
-import os
-import json
-import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,64 +9,12 @@ from tqdm import tqdm
 from models import get_model
 from utils import (
     get_datasets, evaluate, compute_unique_activations, 
-    register_activation_hook, compute_major_regions, save_major_regions
+    register_activation_hook, compute_major_regions, save_major_regions,
+    save_model_checkpoint, set_seed, freeze_final_layer
 )
 from utils.logger import setup_logger  
 from utils.regularization import compute_mrv_loss, compute_hamming_loss
 from config import config
-
-def set_seed(seed):
-    """Ensure reproducibility by setting seeds for all randomness sources."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-def save_model_checkpoint(model, optimizer, modelname, dataset_name, batch_size, metrics, logger, prs_enabled):
-    """Save trained model with PRS metadata, including warmup_epochs in filename."""
-    warmup_epochs = config["warmup_epochs"]
-    save_dir = os.path.join("models", "saved", f"{modelname}_{dataset_name}_batch_{batch_size}_warmup_{warmup_epochs}{'_PRS' if prs_enabled else ''}")
-    os.makedirs(save_dir, exist_ok=True)
-
-    torch.save(model.state_dict(), os.path.join(save_dir, "model.pth"))
-    torch.save(optimizer.state_dict(), os.path.join(save_dir, "optimizer.pth"))
-
-    with open(os.path.join(save_dir, "config.json"), "w") as f:
-        json.dump(config, f, indent=4)
-
-    with open(os.path.join(save_dir, "metrics.json"), "w") as f:
-        json.dump(metrics, f, indent=4)
-
-    logger.info(f"Model and metadata saved in {save_dir}")
-
-def freeze_final_layer(model, modelname, logger):
-    """Freeze the parameters of the final layer in the model."""
-    if 'resnet' in modelname.lower():
-        final_layer = model.fc
-    elif 'vgg' in modelname.lower():
-        final_layer = model.classifier[-1]
-    elif 'mobilenet' in modelname.lower():
-        final_layer = model.classifier
-    else:
-        try:
-            final_layer = model.fc
-            logger.info(f"Using model.fc as final layer for {modelname}")
-        except AttributeError:
-            final_layer = None
-            for name, module in reversed(list(model.named_modules())):
-                if len(list(module.parameters())) > 0:
-                    final_layer = module
-                    logger.info(f"Identified final layer as: {name}")
-                    break
-    
-    if final_layer:
-        for param in final_layer.parameters():
-            param.requires_grad = False
-        logger.info(f"Frozen parameters of the final layer for {modelname}")
-    else:
-        logger.error(f"Could not find final layer to freeze for {modelname}")
 
 def train():
     """Training loop with warm-up, final layer freezing, and PRS regularization."""
@@ -230,7 +175,10 @@ def train():
                 
                     # Save model at the final epoch
                     if epoch == config["epochs"] - 1:
-                        save_model_checkpoint(model, optimizer, modelname, dataset_name, batch_size, metrics, logger, prs_enabled=True)
+                        save_model_checkpoint(
+                            model, optimizer, modelname, dataset_name, batch_size, 
+                            metrics, logger, prs_enabled=True, config=config
+                        )
 
     logger.info("Training Complete")
 

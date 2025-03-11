@@ -1,6 +1,4 @@
 import os
-import json
-import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -11,60 +9,13 @@ from tqdm import tqdm
 
 # Import utility functions
 from models import get_model
-from utils import get_datasets, evaluate, compute_unique_activations, register_activation_hook, compute_major_regions, save_major_regions
+from utils import (
+    get_datasets, evaluate, compute_unique_activations, 
+    register_activation_hook, compute_major_regions, save_major_regions,
+    save_model_checkpoint, set_seed, initialize_weights
+)
 from utils.logger import setup_logger
 from config import config
-
-
-def set_seed(seed):
-    """Ensure reproducibility by setting seeds for all randomness sources."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def save_model_checkpoint(model, optimizer, scheduler, modelname, dataset_name, batch_size, metrics, logger):
-    """Save trained model, optimizer state, and metadata."""
-    save_dir = os.path.join("models", "saved", f"{modelname}_{dataset_name}_batch_{batch_size}_NAN")
-    os.makedirs(save_dir, exist_ok=True)
-
-    torch.save(model.state_dict(), os.path.join(save_dir, "model.pth"))
-    torch.save(optimizer.state_dict(), os.path.join(save_dir, "optimizer.pth"))
-    
-    if scheduler is not None:
-        torch.save(scheduler.state_dict(), os.path.join(save_dir, "scheduler.pth"))
-
-    with open(os.path.join(save_dir, "config.json"), "w") as f:
-        json.dump(config, f, indent=4)
-
-    with open(os.path.join(save_dir, "metrics.json"), "w") as f:
-        json.dump(metrics, f, indent=4)
-
-    logger.info(f"Model and metadata saved in {save_dir}")
-
-
-def initialize_weights(model):
-    """Apply improved weight initialization to model."""
-    for m in model.modules():
-        if isinstance(m, nn.Conv2d):
-            # Kaiming initialization for convolutional layers
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.BatchNorm2d):
-            # Standard initialization for batch normalization
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Linear):
-            # Xavier initialization for fully connected layers
-            nn.init.xavier_normal_(m.weight)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-    return model
-
 
 def train():
     """Main training loop with enhanced stability features."""
@@ -216,7 +167,7 @@ def train():
                     major_regions, unique_patterns = compute_major_regions(
                         final_epoch_activations, final_epoch_labels, num_classes=10, logger=logger
                     )
-                    save_major_regions(major_regions, unique_patterns, dataset_name, batch_size, modelname, logger, warmup_epochs=config["warmup_epochs"])
+                    save_major_regions(major_regions, unique_patterns, dataset_name, batch_size, modelname, logger, nan_enabled=True, warmup_epochs=config["warmup_epochs"])
                 else:
                     logger.warning("Unable to compute major regions: no activations available")
 
@@ -225,8 +176,11 @@ def train():
                 os.makedirs(results_save_path, exist_ok=True)
 
                 results[f"{dataset_name}_batch_{batch_size}"] = metrics
-
-                save_model_checkpoint(model, optimizer, scheduler, modelname, dataset_name, batch_size, metrics, logger)
+                
+                save_model_checkpoint(
+                    model, optimizer, scheduler, modelname, dataset_name, batch_size, 
+                    metrics, logger
+                )
 
     logger.info("Training Complete")
 
