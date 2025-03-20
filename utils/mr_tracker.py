@@ -26,7 +26,6 @@ def compute_major_regions(activations, labels, num_classes, logger):
     logger.info(f"Activations shape: {activations.shape}")
     logger.info(f"Labels shape: {labels.shape}")
     logger.info(f"Number of classes: {num_classes}")
-    logger.info(f"Using RDR Agreement Threshold: {RDR_AGREEMENT_THRESHOLD}")
 
     class_patterns = {c: defaultdict(int) for c in range(num_classes)}
     unique_patterns = {}

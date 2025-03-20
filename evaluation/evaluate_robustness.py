@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 
 # Add project root to Python path
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -11,6 +12,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 import numpy as np
+from pathlib import Path
 
 # Import with correct paths for your project structure
 from config import config
@@ -53,15 +55,45 @@ def evaluate_robustness(model, data_loader, attack_fn, attack_params, epsilon, d
 
 def extract_model_info(folder_path):
     """
-    Extract model parameters from folder path.
-    Example path: /home/tair/project_root/models/saved/VGG16_CIFAR10_batch_128_warmup_50_PRS
+    Extract model parameters from folder path, handling both formats:
+    - /home/tair/project_root/models/saved/CNN-6_CIFAR10_batch_128_warmup_50_PRS
+    - /home/tair/project_root/models/saved/CNN-6_CIFAR10_batch_128/epoch_300
+    - /home/tair/project_root/models/saved/CNN-6_CIFAR10_batch_128_warmup_50_PRS/epoch_63
+    
+    Returns model_name, dataset_name, batch_size, prs_enabled, warmup_epochs, epoch_num
     """
-    basename = os.path.basename(folder_path)
-    parts = basename.split('_')
+    path = Path(folder_path)
+    
+    # Check if we're in an epoch subdirectory
+    epoch_num = None
+    if path.name.startswith('epoch_'):
+        # Extract epoch number
+        epoch_match = re.search(r'epoch_(\d+)', path.name)
+        if epoch_match:
+            epoch_num = int(epoch_match.group(1))
+        # Use parent directory for model info
+        model_dir = path.parent.name
+    else:
+        # We're directly in the model directory
+        model_dir = path.name
+    
+    # Split the model directory name
+    parts = model_dir.split('_')
     
     # Extract basic information
-    model_name = parts[0]  # e.g., 'VGG16'
-    dataset_name = parts[1]  # e.g., 'CIFAR10'
+    model_name = parts[0]  # e.g., 'CNN-6'
+    
+    # For the dataset name, we need to be careful as it might contain hyphens
+    # Assuming dataset is always followed by 'batch'
+    dataset_name = None
+    for i, part in enumerate(parts):
+        if part == "batch" and i > 0:
+            # The part before "batch" is the dataset name
+            dataset_name = parts[i-1]
+            break
+    
+    if dataset_name is None:
+        raise ValueError(f"Could not extract dataset name from folder name: {model_dir}")
     
     # Look for batch size
     batch_size = None
@@ -71,23 +103,25 @@ def extract_model_info(folder_path):
             break
     
     if batch_size is None:
-        raise ValueError(f"Could not extract batch size from folder name: {basename}")
+        raise ValueError(f"Could not extract batch size from folder name: {model_dir}")
     
     # Check for PRS and warmup
-    prs_enabled = "PRS" in basename
-    warmup_epochs = 50  # default
+    prs_enabled = "PRS" in model_dir
+    warmup_epochs = None
     
     for i, part in enumerate(parts):
         if part == "warmup" and i + 1 < len(parts):
             warmup_epochs = int(parts[i + 1])
             break
     
-    return model_name, dataset_name, batch_size, prs_enabled, warmup_epochs
+    # Return all the extracted information
+    return model_name, dataset_name, batch_size, prs_enabled, warmup_epochs, epoch_num
 
 # Custom function to load model directly from complete path
 def load_model_from_folder(folder_path, device="cuda"):
     """
     Load model directly from the provided folder path.
+    Handles both direct model directories and epoch subdirectories.
     
     Args:
         folder_path (str): Path to folder containing model.pth
@@ -96,24 +130,39 @@ def load_model_from_folder(folder_path, device="cuda"):
     Returns:
         torch.nn.Module: Loaded model
     """
-    model_path = os.path.join(folder_path, "model.pth")
+    folder_path = Path(folder_path)
+    model_path = folder_path / "model.pth"
     
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
     
     # Extract model info to determine architecture
-    model_name, _, _, _, _ = extract_model_info(folder_path)
+    model_name, dataset_name, batch_size, prs_enabled, warmup_epochs, epoch_num = extract_model_info(folder_path)
     
     # Initialize model architecture
-    model = get_model(model_name, input_channels=3)
+    input_channels = 3  # Default for CIFAR10
+    if dataset_name == "MNIST":
+        input_channels = 1
+    
+    model = get_model(model_name, input_channels=input_channels)
     
     # Load the weights
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
     
+    # Construct an informative model description
+    model_desc = f"{model_name} ({dataset_name}, batch={batch_size}"
+    if warmup_epochs is not None:
+        model_desc += f", warmup={warmup_epochs}"
+    if prs_enabled:
+        model_desc += ", PRS"
+    if epoch_num is not None:
+        model_desc += f", epoch={epoch_num}"
+    model_desc += ")"
+    
     print(f"Loaded trained model from {model_path}")
-    return model
+    return model, model_desc
 
 def main():
     """Main function to evaluate adversarial robustness of trained models."""
@@ -124,22 +173,24 @@ def main():
     args = parser.parse_args()
 
     device = config["device"] if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
     
-    # Extract model parameters from folder paths (for debugging/info)
-    model1_info = extract_model_info(args.folder1)
-    model2_info = extract_model_info(args.folder2)
-    
-    print(f"Model 1 info: {model1_info}")
-    print(f"Model 2 info: {model2_info}")
-
     # Load trained models directly from the provided paths
+    model1, model1_desc = load_model_from_folder(args.folder1, device)
+    model2, model2_desc = load_model_from_folder(args.folder2, device)
+    
+    # Extract dataset name from first model for consistency
+    _, dataset_name, _, _, _, _ = extract_model_info(args.folder1)
+    
     models_to_evaluate = {
-        "Model 1": load_model_from_folder(args.folder1, device),
-        "Model 2": load_model_from_folder(args.folder2, device),
+        model1_desc: model1,
+        model2_desc: model2,
     }
+    
+    print(f"Evaluating models:\n1. {model1_desc}\n2. {model2_desc}")
 
-    # Load CIFAR-10 Training & Test Dataset
-    train_dataset, test_dataset, _ = get_datasets("CIFAR10")
+    # Load Dataset Based on the extracted dataset name
+    train_dataset, test_dataset, _ = get_datasets(dataset_name)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=128, shuffle=False)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=128, shuffle=False)
 
@@ -163,9 +214,13 @@ def main():
                 print(f"{attack_name} Train Acc ({model_name}) at ε={epsilon}: {train_acc:.2f}%")
                 print(f"{attack_name} Test Acc ({model_name}) at ε={epsilon}: {test_acc:.2f}%")
 
+    # Create timestamp for unique filename
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
     # Save results to JSON
     os.makedirs(config["results_save_path"], exist_ok=True)
-    results_path = os.path.join(config["results_save_path"], "adversarial_results_cnn.json")
+    results_path = os.path.join(config["results_save_path"], f"adversarial_results_{timestamp}_.json")
 
     with open(results_path, "w") as f:
         json.dump(results, f, indent=4)

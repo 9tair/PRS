@@ -1,4 +1,3 @@
-import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -119,25 +118,16 @@ def train():
 
                     # Save checkpoint, compute major regions, and save every 50 epochs or last epoch
                     if epoch in save_epochs:
-                        epoch_dir = os.path.join("models", "saved", modelname, dataset_name, f"batch_{batch_size}", f"epoch_{epoch}")
-                        os.makedirs(epoch_dir, exist_ok=True)
-
-                        # Compute and Save Major Regions & Unique Patterns
                         major_regions, unique_patterns = compute_major_regions(final_epoch_activations, final_epoch_labels, num_classes=10, logger=logger)
-                        save_major_regions(major_regions, unique_patterns, dataset_name, batch_size, modelname, logger, warmup_epochs=config["warmup_epochs"])
-
-                        # Save model checkpoint
                         save_model_checkpoint(
                             model, optimizer, modelname, dataset_name, batch_size, 
-                            metrics, logger, extra_tag=f"epoch_{epoch}"
+                            metrics, logger, config=config, 
+                            extra_tag=None, epoch=epoch,
+                            major_regions=major_regions, unique_patterns=unique_patterns
                         )
-
-                        # Save model weights separately
-                        torch.save(model.state_dict(), os.path.join(epoch_dir, "weights.pth"))
 
                 hook_handle.remove()  # Remove hooks after training
 
-                # Store final results
                 results[f"{dataset_name}_batch_{batch_size}"] = metrics
 
     logger.info("Training Complete")

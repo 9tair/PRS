@@ -4,11 +4,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Constants
-RESULTS_PATH = "results/adversarial_results_cnn.json"
-SAVE_PATH = "results/adversarial_results_cnn.png"
+RESULTS_PATH = "results/adversarial_results_20250317_180340_.json"
+SAVE_PATH = "results/adversarial_results_20250317_180340_.png"
 
 # Define colors and styles dynamically
-COLOR_PALETTE = {"Model 1": "darkorange", "Model 2": "royalblue"}
+COLOR_PALETTE = {"CNN-6 (CIFAR10, batch=128, epoch=300)": "darkorange", "CNN-6 (CIFAR10, batch=128, warmup=50, PRS, epoch=63)": "royalblue"}
 LINE_STYLES = {"Train": "solid", "Test": "dashed"}
 MARKERS = {"Train": "o", "Test": "s"}
 
@@ -48,7 +48,7 @@ def plot_adversarial_results(results):
         has_data = False  # Flag to check if attack has any valid data
 
         for model in model_names:
-            model_type = "Model 1" if "Model 1" in model else "Model 2"
+            model_type = "CNN-6 (CIFAR10, batch=128, epoch=300)" if "CNN-6 (CIFAR10, batch=128, epoch=300)" in model else "CNN-6 (CIFAR10, batch=128, warmup=50, PRS, epoch=63)"
 
             for eval_type in ["Train", "Test"]:
                 color = COLOR_PALETTE[model_type]

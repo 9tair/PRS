@@ -7,18 +7,34 @@ import argparse
 import re
 
 def extract_params_from_filepath(filepath):
-    """Extracts model name, dataset, and batch size from the parent folder of the given filepath."""
-    dir_path = os.path.dirname(filepath)  # Extract directory containing the file
-    folder_name = os.path.basename(dir_path)  # Extract last folder in path
-
-    # Example folder name: "VGG16_CIFAR10_batch_128_warmup_1_PRS"
-    match = re.search(r"(.+?)_(.+?)_batch_(\d+)", folder_name)
+    """Extracts model name, dataset, and batch size from the filepath structure."""
+    # Split the path to handle both with and without epoch folders
+    path_parts = filepath.split(os.sep)
     
+    # Find the 'saved' directory index
+    try:
+        saved_idx = path_parts.index('saved')
+    except ValueError:
+        raise ValueError(f"Invalid path structure: 'saved' directory not found in {filepath}")
+    
+    # The model directory is right after 'saved'
+    if saved_idx + 1 >= len(path_parts):
+        raise ValueError(f"Invalid path structure: no directory after 'saved' in {filepath}")
+    
+    model_dir_name = path_parts[saved_idx + 1]
+    
+    # Extract model parameters from directory name
+    match = re.search(r"(.+?)_(.+?)_batch_(\d+)", model_dir_name)
     if not match:
-        raise ValueError(f"Invalid directory format: {folder_name}. Expected format: <MODEL>_<DATASET>_batch_<BATCH_SIZE>_warmup_<N>_PRS")
+        raise ValueError(f"Invalid directory format: {model_dir_name}. Expected format: <MODEL>_<DATASET>_batch_<BATCH_SIZE>")
     
     model_name, dataset_name, batch_size = match.groups()
-    return model_name, dataset_name, int(batch_size), dir_path
+    
+    # Determine the save directory (where the plot will be saved)
+    # This should be the same directory containing the major_regions.json file
+    save_dir = os.path.dirname(filepath)
+    
+    return model_name, dataset_name, int(batch_size), save_dir
 
 def load_major_region_data(filepath):
     """Loads major region JSON data based on the provided file path."""
@@ -34,10 +50,15 @@ def load_major_region_data(filepath):
 def plot_mr_stacked_bar(filepath):
     """Generates a stacked bar plot for major and extra regions per class."""
     
-    # Extract parameters from the parent folder
+    # Extract parameters from the filepath
     model_name, dataset_name, batch_size, save_dir = extract_params_from_filepath(filepath)
     
+    # Load the data
     data = load_major_region_data(filepath)
+
+    # Check if epoch information is in the path
+    epoch_match = re.search(r"epoch_(\d+)", filepath)
+    epoch_info = f"Epoch {epoch_match.group(1)}" if epoch_match else "Final"
 
     num_classes = 10  # Assuming CIFAR-10 / MNIST-style datasets
     expected_samples_per_class = 5000  # Expected count for balanced datasets
@@ -79,7 +100,9 @@ def plot_mr_stacked_bar(filepath):
     fig, ax = plt.subplots(figsize=(12, 6))
 
     bottom = np.zeros(num_classes)  # Track bar height for stacking
-    colors = plt.colormaps.get_cmap("tab20")
+    
+    # Fix for the deprecation warning - use the recommended method
+    colors = plt.colormaps["tab20"]  # Using plt.colormaps instead of plt.cm.get_cmap
 
     for i in range(num_classes):
         for j, count in enumerate(region_counts[i]):
@@ -96,10 +119,11 @@ def plot_mr_stacked_bar(filepath):
     ax.set_ylabel("Number of Samples")
     ax.set_xticks(range(num_classes))
     ax.set_xticklabels([f"{c}\n({int(class_sample_counts[c])})" for c in range(num_classes)])  # Add total sample count per class
-    ax.set_title(f"Stacked Marginal and Extra Regions - {model_name} {dataset_name}, Batch {batch_size}")
+    ax.set_title(f"Stacked Marginal and Extra Regions - {model_name} {dataset_name}, Batch {batch_size}, {epoch_info}")
 
     # 🔹 Save & show
-    save_path = os.path.join(save_dir, "major_regions.png")
+    plot_filename = f"major_regions_{epoch_info.replace(' ', '_').lower()}.png"
+    save_path = os.path.join(save_dir, plot_filename)
     plt.savefig(save_path, bbox_inches="tight")
     plt.show()
 

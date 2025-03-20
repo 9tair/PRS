@@ -17,17 +17,32 @@ def load_json(filepath):
 # ---------------------- Extract Model, Dataset, Batch Info from Folder ----------------------
 def extract_info_from_folder(folder_path):
     """
-    Extracts model name, dataset, and batch size from the provided folder name.
-    Example folder name format: "VGG16_CIFAR10_batch_128_warmup_1_PRS"
+    Extracts model name, dataset, and batch size from the provided folder path.
+    Works with both standard paths and epoch-containing paths.
+    
+    Example folder structures:
+    - /home/tair/project_root/models/saved/CNN-6_CIFAR10_batch_128/
+    - /home/tair/project_root/models/saved/CNN-6_CIFAR10_batch_128/epoch_50/
     """
+    # Check if we're in an epoch subdirectory
     folder_name = os.path.basename(folder_path)
-    match = re.search(r"(.+?)_(.+?)_batch_(\d+)", folder_name)
-
+    parent_folder = os.path.dirname(folder_path)
+    
+    # If we're in an epoch folder, use the parent directory for model info
+    if folder_name.startswith('epoch_'):
+        model_folder = os.path.basename(parent_folder)
+        epoch_num = int(re.search(r'epoch_(\d+)', folder_name).group(1))
+    else:
+        model_folder = folder_name
+        epoch_num = None
+    
+    # Extract model information from the model folder name
+    match = re.search(r"(.+?)_(.+?)_batch_(\d+)", model_folder)
     if not match:
-        raise ValueError(f"Invalid folder format: {folder_name}. Expected format: <MODEL>_<DATASET>_batch_<BATCH_SIZE>_warmup_<N>_PRS")
-
+        raise ValueError(f"Invalid folder format: {model_folder}. Expected format: <MODEL>_<DATASET>_batch_<BATCH_SIZE>...")
+    
     model_name, dataset_name, batch_size = match.groups()
-    return model_name, dataset_name, int(batch_size)
+    return model_name, dataset_name, int(batch_size), epoch_num
 
 # ---------------------- Compute Classwise Intersection ----------------------
 def compute_classwise_intersection(major_regions, unique_patterns):
@@ -117,7 +132,7 @@ def compare_mr_with_all_regions(major_regions, unique_patterns):
     return comparison_results
 
 # ---------------------- Visualization ----------------------
-def plot_max_min_comparisons(comparison_results, intersection_results, global_intersection, output_path):
+def plot_max_min_comparisons(comparison_results, intersection_results, global_intersection, output_path, model_name, dataset_name, batch_size, epoch_num=None):
     """
     Plots a bar chart of max, min common coordinates per class, intra-class intersection, and inter-class intersection.
     Added numerical values on top of each bar.
@@ -154,7 +169,13 @@ def plot_max_min_comparisons(comparison_results, intersection_results, global_in
     plt.xticks(list(x) + [global_x], class_labels + ["Global"], rotation=45)
     plt.xlabel("Class Labels")
     plt.ylabel("Number of Common Coordinates")
-    plt.title("Comparison of MR with Extra Regions (Max vs. Min), Intra-Class Intersection, and Global Intersection")
+    
+    # Add epoch information to title if available
+    title = f"Comparison of MR with Extra Regions - {model_name} {dataset_name}, Batch {batch_size}"
+    if epoch_num is not None:
+        title += f", Epoch {epoch_num}"
+    
+    plt.title(title)
     plt.legend()
     plt.grid(axis="y", linestyle="--", alpha=0.7)
     
@@ -162,6 +183,7 @@ def plot_max_min_comparisons(comparison_results, intersection_results, global_in
     plt.tight_layout()
     plt.subplots_adjust(top=0.9)
 
+    # Ensure output directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     plt.savefig(output_path, dpi=300)
     plt.show()
@@ -169,17 +191,21 @@ def plot_max_min_comparisons(comparison_results, intersection_results, global_in
 # ---------------------- Main Execution ----------------------
 def main():
     parser = argparse.ArgumentParser(description="Analyze and visualize major regions vs. extra regions from a given folder.")
-    parser.add_argument("--folder", type=str, required=True, help="Path to the folder containing major_regions.json and activation_patterns.json")
+    parser.add_argument("--folder", type=str, required=True, help="Path to the folder containing major_regions.json and unique_patterns.json")
     args = parser.parse_args()
 
     folder_path = args.folder
 
     # Extract model details from the folder name
-    model_name, dataset_name, batch_size = extract_info_from_folder(folder_path)
+    model_name, dataset_name, batch_size, epoch_num = extract_info_from_folder(folder_path)
 
     # Construct file paths
     major_regions_path = os.path.join(folder_path, "major_regions.json")
+    
+    # Look for either activation_patterns.json or unique_patterns.json
     activation_patterns_path = os.path.join(folder_path, "activation_patterns.json")
+    if not os.path.exists(activation_patterns_path):
+        activation_patterns_path = os.path.join(folder_path, "unique_patterns.json")
 
     # Load data
     major_regions = load_json(major_regions_path)
@@ -195,8 +221,25 @@ def main():
     global_intersection = compute_intersection_across_classes(intersection_results)
 
     # Generate visualization
-    plot_path = os.path.join(folder_path, "mr_comparison_plot.png")
-    plot_max_min_comparisons(comparison_mr_vs_all, intersection_results, global_intersection, plot_path)
+    # Create appropriate filename based on epoch if applicable
+    if epoch_num is not None:
+        plot_filename = f"mr_comparison_plot_epoch_{epoch_num}.png"
+    else:
+        plot_filename = "mr_comparison_plot.png"
+    
+    plot_path = os.path.join(folder_path, plot_filename)
+    plot_max_min_comparisons(
+        comparison_mr_vs_all, 
+        intersection_results, 
+        global_intersection, 
+        plot_path,
+        model_name,
+        dataset_name,
+        batch_size,
+        epoch_num
+    )
+    
+    print(f"Analysis completed. Plot saved to: {plot_path}")
 
 if __name__ == "__main__":
     main()

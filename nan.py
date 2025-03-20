@@ -25,7 +25,6 @@ def train():
     # Training hyperparameters
     base_lr = 5e-4  # Reduced from 1e-3
     weight_decay = 1e-4  # Added weight decay
-    gradient_accumulation_steps = 4  # Accumulate gradients over multiple batches
     
     for modelname in tqdm(config['models'], desc="Model Loop"):
         for dataset_name in tqdm(config["datasets"], desc="Dataset Loop"):
@@ -34,14 +33,10 @@ def train():
                 # Initialize dynamic logger for this setting
                 logger = setup_logger(modelname, dataset_name, batch_size)
                 logger.info(f"Starting Training | Model: {modelname} | Dataset: {dataset_name} | Batch Size: {batch_size}")
-                logger.info(f"Using lr={base_lr}, weight_decay={weight_decay}, grad_accum_steps={gradient_accumulation_steps}")
+                logger.info(f"Using lr={base_lr}, weight_decay={weight_decay}")
 
                 train_dataset, test_dataset, input_channels = get_datasets(dataset_name)
-                train_dataset_size = len(train_dataset)
-                effective_batch_size = batch_size * gradient_accumulation_steps
                 
-                logger.info(f"Actual batch size: {batch_size}, Effective batch size with accumulation: {effective_batch_size}")
-
                 train_loader = DataLoader(
                     train_dataset, batch_size=batch_size, shuffle=True, 
                     worker_init_fn=lambda _: np.random.seed(config["seed"]),
@@ -51,7 +46,7 @@ def train():
 
                 # Get model and apply improved initialization
                 model = get_model(modelname, input_channels).to(config["device"])
-                model = initialize_weights(model)
+                initialize_weights(model)  # Assume this doesn't return anything
                 
                 # Setup optimizer with weight decay
                 optimizer = optim.AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
@@ -64,68 +59,56 @@ def train():
                 )
                 
                 criterion = nn.CrossEntropyLoss()
-                scaler = torch.amp.GradScaler("cuda")
+                scaler = torch.amp.GradScaler()  # Fixed: no argument needed
 
                 metrics = {"epoch": [], "train_accuracy": [], "test_accuracy": [], "prs_ratios": [], "learning_rates": []}
                 activations = {"penultimate": [], "skip_batch": False}
 
                 hook_handle = register_activation_hook(model, activations, modelname, dataset_name, batch_size, logger)
+                
+                total_epochs = config["epochs"]
+                save_epochs = set(range(50, total_epochs + 1, 50)) 
+                save_epochs.add(total_epochs)  
 
                 for epoch in tqdm(range(config["epochs"]), desc=f"Training {dataset_name} | Batch {batch_size}"):
                     model.train()
                     epoch_loss, correct_train, total_train = 0, 0, 0
-                    activations["penultimate"].clear()
+                    activations["penultimate"] = []  # Clear the list for this epoch
                     batch_labels = []
                     
+                    logger.info(f"Epoch {epoch+1}/{total_epochs} | Model: {modelname} | Dataset: {dataset_name}")
+
                     current_lr = scheduler.get_last_lr()[0]
                     metrics["learning_rates"].append(current_lr)
                     logger.info(f"Epoch {epoch+1}/{config['epochs']} | Model: {modelname} | Dataset: {dataset_name} | LR: {current_lr:.6f}")
-
-                    # Reset gradients at the start of each epoch
-                    optimizer.zero_grad()
-                    accumulated_batches = 0
 
                     for batch_idx, (inputs, labels) in enumerate(train_loader):
                         activations["skip_batch"] = False
                         inputs, labels = inputs.to(config["device"]), labels.to(config["device"])
                         
                         # Forward pass with mixed precision
-                        with torch.amp.autocast("cuda"):
+                        with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu"):  # Fixed: proper autocast syntax
                             outputs = model(inputs)
-                            loss = criterion(outputs, labels) / gradient_accumulation_steps  # Scale loss
-
+                            loss = criterion(outputs, labels)
+                        
+                        # Check if the hook flagged this batch to be skipped (e.g., due to NaN)
                         if activations["skip_batch"]:
-                            logger.warning(f"Skipping NaN batch | Epoch: {epoch+1} | Batch: {batch_idx}")
-                            continue  # Skip problematic batch
+                            logger.warning(f"Skipping problematic batch | Epoch: {epoch+1} | Batch: {batch_idx}")
+                            continue
 
                         # Backward pass with gradient scaling
+                        optimizer.zero_grad()
                         scaler.scale(loss).backward()
                         
-                        # Accumulate gradients over multiple batches
-                        accumulated_batches += 1
+                        # Apply gradient clipping
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                         
-                        if accumulated_batches == gradient_accumulation_steps or batch_idx == len(train_loader) - 1:
-                            # Check for NaN gradients before optimizer step
-                            if any(torch.isnan(param.grad).any() for param in model.parameters() if param.grad is not None):
-                                logger.warning(f"NaN detected in gradients. Skipping update | Epoch: {epoch+1} | Batch: {batch_idx}")
-                                # Reset gradients without applying them
-                                optimizer.zero_grad()
-                                accumulated_batches = 0
-                                continue
-                            
-                            # Apply gradient clipping
-                            scaler.unscale_(optimizer)
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Reduced from 5.0
-                            
-                            # Step optimizer and update scaler
-                            scaler.step(optimizer)
-                            scaler.update()
-                            
-                            # Reset gradients
-                            optimizer.zero_grad()
-                            accumulated_batches = 0
+                        # Step optimizer and update scaler
+                        scaler.step(optimizer)
+                        scaler.update()
 
-                        epoch_loss += loss.item() * gradient_accumulation_steps  # Re-scale loss for logging
+                        epoch_loss += loss.item()
                         batch_labels.append(labels.cpu().numpy())
 
                         _, predicted = outputs.max(1)
@@ -135,22 +118,22 @@ def train():
                     # Update learning rate scheduler at the end of each epoch
                     scheduler.step()
                     
-                    # Process activations
-                    if activations["penultimate"]:  # Check if list is not empty
+                    # Calculate PRS ratio if we have activations
+                    if len(activations["penultimate"]) > 0:
                         final_epoch_activations = torch.cat(activations["penultimate"], dim=0).cpu().numpy()
                         final_epoch_labels = np.concatenate(batch_labels, axis=0)
-
-                        # Compute PRS Ratio
-                        prs_ratio = compute_unique_activations(final_epoch_activations, logger) / train_dataset_size
+                        prs_ratio = compute_unique_activations(final_epoch_activations, logger) / len(train_dataset)
                         metrics["prs_ratios"].append(prs_ratio)
+                        logger.info(f"Epoch {epoch+1} | PRS Ratio: {prs_ratio:.4f}")
                     else:
-                        logger.warning(f"No activations collected in epoch {epoch+1}")
-                        metrics["prs_ratios"].append(0.0)
-                        final_epoch_activations = None
-                        final_epoch_labels = None
-
+                        logger.warning(f"No activations captured in epoch {epoch+1}. Check activation hook.")
+                        metrics["prs_ratios"].append(0)
+                    
                     # Evaluate on Test Set
+                    hook_handle.remove()  # Temporarily remove hook during evaluation
                     test_accuracy = evaluate(model, test_loader, config["device"])
+                    hook_handle = register_activation_hook(model, activations, modelname, dataset_name, batch_size, logger)  # Re-register hook
+                    
                     train_accuracy = 100 * correct_train / total_train if total_train > 0 else 0
                     
                     # Store Metrics
@@ -160,30 +143,36 @@ def train():
                     
                     logger.info(f"Epoch {epoch+1}/{config['epochs']} | Loss: {epoch_loss:.4f} | Train Acc: {train_accuracy:.2f}% | Test Acc: {test_accuracy:.2f}% | LR: {current_lr:.6f}")
 
-                hook_handle.remove()  # Ensure hook is removed after training
-
-                # Compute and Save MR/ER using only LAST epoch activations
-                if final_epoch_activations is not None and final_epoch_labels is not None:
-                    major_regions, unique_patterns = compute_major_regions(
-                        final_epoch_activations, final_epoch_labels, num_classes=10, logger=logger
-                    )
-                    save_major_regions(major_regions, unique_patterns, dataset_name, batch_size, modelname, logger, nan_enabled=True, warmup_epochs=config["warmup_epochs"])
-                else:
-                    logger.warning("Unable to compute major regions: no activations available")
-
-                # Ensure results directory exists
-                results_save_path = config["results_save_path"]
-                os.makedirs(results_save_path, exist_ok=True)
-
-                results[f"{dataset_name}_batch_{batch_size}"] = metrics
+                    # Save checkpoint at specified epochs
+                    if epoch + 1 in save_epochs:
+                        # Compute major regions using the actual activations and labels
+                        if len(activations["penultimate"]) > 0:
+                            major_regions, unique_patterns = compute_major_regions(
+                                final_epoch_activations, 
+                                final_epoch_labels, 
+                                num_classes=10, 
+                                logger=logger
+                            )
+                            
+                            # Save the model checkpoint with the computed regions
+                            save_model_checkpoint(
+                                model, optimizer, modelname, dataset_name, batch_size, 
+                                metrics, logger, config=config, 
+                                epoch=epoch + 1,
+                                major_regions=major_regions, 
+                                unique_patterns=unique_patterns
+                            )
+                        else:
+                            logger.error(f"Cannot compute major regions for epoch {epoch+1} - no activations collected")
+                        
+                # Make sure to remove the hook after training
+                hook_handle.remove()
                 
-                save_model_checkpoint(
-                    model, optimizer, scheduler, modelname, dataset_name, batch_size, 
-                    metrics, logger
-                )
+                # Store results for this configuration
+                results[f"{modelname}_{dataset_name}_batch_{batch_size}"] = metrics
 
     logger.info("Training Complete")
-
+    return results
 
 if __name__ == "__main__":
     train()
