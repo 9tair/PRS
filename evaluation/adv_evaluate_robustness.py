@@ -18,8 +18,9 @@ sys.path.append(project_root)
 
 # Import project-specific modules
 from config import config
-from utils import fgsm_attack, bim_attack, pgd_attack, get_datasets
+from utils import fgsm_attack, bim_attack, pgd_attack, get_datasets, cw_attack, autoattack
 from models.model_factory import get_model
+
 
 
 def load_model_from_folder(folder, device="cuda"):
@@ -128,8 +129,8 @@ def check_model_accuracy(model, data_loader, device):
     return accuracy
 
 def denormalize(tensor, mean, std):
-    mean = torch.tensor(mean).view(3, 1, 1)
-    std = torch.tensor(std).view(3, 1, 1)
+    mean = mean.clone().detach().view(3, 1, 1)
+    std = std.clone().detach().view(3, 1, 1)
     return tensor * std + mean  # Reverse normalization
 
 def save_image_safely(tensor, filepath, dataset="CIFAR10"):
@@ -137,19 +138,31 @@ def save_image_safely(tensor, filepath, dataset="CIFAR10"):
     try:
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
-        # Clone tensor to avoid modification
+        # Handle the case where tensor is a list
+        if isinstance(tensor, list):
+            tensor = torch.stack(tensor)  # Convert list of tensors to a single tensor
+        
+        # Ensure tensor is on CPU and detached from computation graph
         tensor_to_save = tensor.clone().detach().cpu()
 
         # Define mean and std based on dataset
         if dataset == "CIFAR10":
-            mean = [0.4914, 0.4822, 0.4465]
-            std = [0.247, 0.243, 0.261]
+            mean = torch.tensor([0.4914, 0.4822, 0.4465])
+            std = torch.tensor([0.247, 0.243, 0.261])
         elif dataset == "MNIST" or dataset == "FMNIST":
-            mean = [0.1307]
-            std = [0.3081]
+            mean = torch.tensor([0.1307])
+            std = torch.tensor([0.3081])
         else:
-            mean = [0.5, 0.5, 0.5]  # Default to generic normalization
-            std = [0.5, 0.5, 0.5]
+            mean = torch.tensor([0.5, 0.5, 0.5])  # Default to generic normalization
+            std = torch.tensor([0.5, 0.5, 0.5])
+
+        # Reshape mean and std for broadcasting
+        if dataset == "MNIST" or dataset == "FMNIST":
+            mean = mean.view(1, 1, 1)
+            std = std.view(1, 1, 1)
+        else:
+            mean = mean.view(3, 1, 1)
+            std = std.view(3, 1, 1)
 
         # Denormalize
         tensor_to_save = denormalize(tensor_to_save, mean, std)
@@ -166,7 +179,7 @@ def save_image_safely(tensor, filepath, dataset="CIFAR10"):
 
 
 def evaluate_robustness_with_samples(model, data_loader, attack_fn, attack_params, epsilon, 
-                                    output_dir, attack_name, device="cuda", num_samples_to_save=5):
+                                    output_dir, attack_name, dataset_name, device="cuda", num_samples_to_save=5):
     """Evaluates model robustness, collects statistics, and saves adversarial examples."""
     model.to(device).eval()
     correct = 0
@@ -212,7 +225,12 @@ def evaluate_robustness_with_samples(model, data_loader, attack_fn, attack_param
             _, clean_predicted = clean_outputs.max(1)
 
         # Generate adversarial examples
-        adv_inputs = attack_fn(model, inputs.clone(), labels, epsilon=epsilon, **attack_params).detach()
+        if attack_name == "AutoAttack":
+            adv_inputs = attack_fn(model, inputs.clone(), labels, dataset_name=dataset_name).detach()
+        elif attack_name == "CW":
+            adv_inputs = attack_fn(model, inputs.clone(), labels, **attack_params).detach()
+        else:
+            adv_inputs = attack_fn(model, inputs.clone(), labels, epsilon=epsilon, **attack_params).detach()
 
         # Adversarial prediction
         with torch.no_grad():
@@ -248,32 +266,48 @@ def evaluate_robustness_with_samples(model, data_loader, attack_fn, attack_param
 
                     # Create comparison image
                     if success:
+                        # Use this to replace the comparison image creation section in evaluate_robustness_with_samples function
                         try:
                             fig, axes = plt.subplots(1, 2, figsize=(10, 5))
 
-                            # Move tensors to the same device
-                            inputs = inputs.to(device)
-                            adv_inputs = adv_inputs.to(device)
+                            # Ensure tensors are properly handled
+                            orig_tensor = inputs[i].clone().detach().cpu()
+                            adv_tensor = adv_inputs[i].clone().detach().cpu()
 
-                            # Ensure mean and std are on the same device
-                            mean = torch.tensor(mean, device=device).view(3, 1, 1)
-                            std = torch.tensor(std, device=device).view(3, 1, 1)
+                            # Create device-independent mean and std tensors
+                            if "CIFAR10" in dataset_name:
+                                mean = torch.tensor([0.4914, 0.4822, 0.4465]).view(3, 1, 1)
+                                std = torch.tensor([0.247, 0.243, 0.261]).view(3, 1, 1)
+                            elif "MNIST" in dataset_name or "FMNIST" in dataset_name:
+                                mean = torch.tensor([0.1307]).view(1, 1, 1)
+                                std = torch.tensor([0.3081]).view(1, 1, 1)
+                            else:
+                                mean = torch.tensor([0.5, 0.5, 0.5]).view(3, 1, 1)
+                                std = torch.tensor([0.5, 0.5, 0.5]).view(3, 1, 1)
 
-                            # Extract original and adversarial images, ensuring they are on CPU before conversion
-                            original_img = denormalize(inputs[i], mean, std).detach().cpu().permute(1, 2, 0).numpy()
-                            adversarial_img = denormalize(adv_inputs[i], mean, std).detach().cpu().permute(1, 2, 0).numpy()
+                            # Extract original and adversarial images
+                            original_img = denormalize(orig_tensor, mean, std).numpy()
+                            adversarial_img = denormalize(adv_tensor, mean, std).numpy()
+
+                            # Handle channel dimensions based on dataset
+                            if dataset_name == "MNIST" or dataset_name == "FMNIST":
+                                original_img = original_img.squeeze(0)  # Remove channel dimension for grayscale
+                                adversarial_img = adversarial_img.squeeze(0)
+                            else:
+                                original_img = original_img.transpose(1, 2, 0)  # Change from CxHxW to HxWxC for color
+                                adversarial_img = adversarial_img.transpose(1, 2, 0)
 
                             # Ensure pixel values are in [0,1] range
                             original_img = np.clip(original_img, 0, 1)
                             adversarial_img = np.clip(adversarial_img, 0, 1)
 
                             # Plot original image
-                            axes[0].imshow(original_img)
+                            axes[0].imshow(original_img, cmap='gray' if dataset_name in ["MNIST", "FMNIST"] else None)
                             axes[0].set_title(f"Original: Class {true_label}")
                             axes[0].axis('off')
 
                             # Plot adversarial image
-                            axes[1].imshow(adversarial_img)
+                            axes[1].imshow(adversarial_img, cmap='gray' if dataset_name in ["MNIST", "FMNIST"] else None)
                             axes[1].set_title(f"Adversarial: Predicted as {adv_pred}")
                             axes[1].axis('off')
 
@@ -287,6 +321,8 @@ def evaluate_robustness_with_samples(model, data_loader, attack_fn, attack_param
 
                         except Exception as e:
                             print(f"Error creating comparison image: {e}")
+                            import traceback
+                            traceback.print_exc()  # Print full traceback for debugging
                             
     # Calculate accuracy
     accuracy = 100.0 * correct / total if total > 0 else 0.0
@@ -475,10 +511,12 @@ def main():
         print(f"Created directory: {dir_path}")
     
     # Attack configurations with all required parameters
-    ATTACKS = {        
-        "FGSM": {"attack_fn": fgsm_attack, "params": {}},  # Epsilon will be varied dynamically
-        "BIM": {"attack_fn": bim_attack, "params": {"alpha": 0.01, "num_iter": 10}},  # BIM uses alpha
-        "PGD-20": {"attack_fn": pgd_attack, "params": {"alpha": 0.007, "num_iter": 20}},  # PGD 20 steps
+    ATTACKS = {
+    "FGSM": {"attack_fn": fgsm_attack, "params": {}},
+    "BIM": {"attack_fn": bim_attack, "params": {"alpha": 0.01, "num_iter": 10}},
+    "PGD-20": {"attack_fn": pgd_attack, "params": {"alpha": 0.007, "num_iter": 20}},
+    "CW": {"attack_fn": cw_attack, "params": {"c": 1e-4, "kappa": 0, "max_iter": 1000, "lr": 0.01}},
+    "AutoAttack": {"attack_fn": autoattack, "params": {}},
     }
     
     # Use provided epsilon values or defaults
@@ -513,45 +551,87 @@ def main():
     for attack_name, attack_data in ATTACKS.items():
         attack_results = {}
         
-        for epsilon in EPSILONS:
+        if attack_name == "CW":
+            # Run CW attack only once (ignoring ε)
             print(f"\n{'='*50}")
-            print(f"Running {attack_name} with epsilon={epsilon}")
+            print(f"Running {attack_name} (L2 attack without epsilon constraint)")
             print(f"{'='*50}")
-            
+
             # Run evaluation on test set
-            print(f"\nEvaluating {attack_name} with epsilon={epsilon} on test set")
+            print(f"\nEvaluating {attack_name} on test set")
             test_stats = evaluate_robustness_with_samples(
                 model, 
                 test_loader,
                 attack_data["attack_fn"], 
-                attack_data["params"], 
-                epsilon, 
+                attack_data["params"],  # No epsilon
+                None,  # Pass None for ε
                 test_output_dir,
                 attack_name,
+                dataset_name,
                 device
             )
-            
+
             # Run evaluation on train set
-            print(f"\nEvaluating {attack_name} with epsilon={epsilon} on train set")
+            print(f"\nEvaluating {attack_name} on train set")
             train_stats = evaluate_robustness_with_samples(
                 model, 
                 train_loader,
                 attack_data["attack_fn"], 
                 attack_data["params"], 
-                epsilon, 
+                None,  # Pass None for ε
                 train_output_dir,
                 attack_name,
+                dataset_name,
                 device
             )
-            
+
             # Store accuracy for summary
-            attack_results[str(epsilon)] = {
+            all_results[attack_name] = {
                 "test_accuracy": test_stats["accuracy"],
                 "train_accuracy": train_stats["accuracy"]
             }
-        
-        all_results[attack_name] = attack_results
-    
+
+        else:
+            for epsilon in EPSILONS:
+                print(f"\n{'='*50}")
+                print(f"Running {attack_name} with epsilon={epsilon}")
+                print(f"{'='*50}")
+
+                # Run evaluation on test set
+                print(f"\nEvaluating {attack_name} with epsilon={epsilon} on test set")
+                test_stats = evaluate_robustness_with_samples(
+                    model, 
+                    test_loader,
+                    attack_data["attack_fn"], 
+                    attack_data["params"], 
+                    epsilon, 
+                    test_output_dir,
+                    attack_name,
+                    dataset_name,
+                    device
+                )
+
+                # Run evaluation on train set
+                print(f"\nEvaluating {attack_name} with epsilon={epsilon} on train set")
+                train_stats = evaluate_robustness_with_samples(
+                    model, 
+                    train_loader,
+                    attack_data["attack_fn"], 
+                    attack_data["params"], 
+                    epsilon, 
+                    train_output_dir,
+                    attack_name,
+                    dataset_name,
+                    device
+                )
+
+                # Store accuracy for summary
+                all_results[attack_name] = all_results.get(attack_name, {})
+                all_results[attack_name][str(epsilon)] = {
+                    "test_accuracy": test_stats["accuracy"],
+                    "train_accuracy": train_stats["accuracy"]
+                }
+
     # Save summary of accuracies to a JSON file
     summary = {
         "model_name": model_desc,
@@ -565,6 +645,38 @@ def main():
     }
     
     summary_path = os.path.join(output_dir, "summary.json")
+    
+    def aggregate_stats(base_dir):
+        all_stats = {}
+        for attack_name in os.listdir(base_dir):
+            attack_dir = os.path.join(base_dir, attack_name)
+            if not os.path.isdir(attack_dir):
+                continue
+            for eps_folder in os.listdir(attack_dir):
+                eps_dir = os.path.join(attack_dir, eps_folder)
+                stats_file = os.path.join(eps_dir, "stats.json")
+                if os.path.exists(stats_file):
+                    with open(stats_file, "r") as f:
+                        stats = json.load(f)
+                    if attack_name not in all_stats:
+                        all_stats[attack_name] = {}
+                    all_stats[attack_name][eps_folder] = stats
+        return all_stats
+
+    # Aggregate test and train stats
+    test_agg_stats = aggregate_stats(test_output_dir)
+    train_agg_stats = aggregate_stats(train_output_dir)
+
+    # Save to JSON
+    with open(os.path.join(test_output_dir, "all_stats.json"), "w") as f:
+        json.dump(test_agg_stats, f, indent=4)
+
+    with open(os.path.join(train_output_dir, "all_stats.json"), "w") as f:
+        json.dump(train_agg_stats, f, indent=4)
+
+    print(f"Aggregated test stats saved to {os.path.join(test_output_dir, 'all_stats.json')}")
+    print(f"Aggregated train stats saved to {os.path.join(train_output_dir, 'all_stats.json')}")
+    
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=4)
     
@@ -572,4 +684,5 @@ def main():
     print(f"Summary saved to {summary_path}")
 
 if __name__ == "__main__":
+    
     main()

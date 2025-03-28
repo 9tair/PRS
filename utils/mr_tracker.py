@@ -45,11 +45,15 @@ def compute_major_regions(activations, labels, num_classes, logger):
             pattern_index_map[pattern_tuple] = pattern_counter
             unique_patterns[pattern_counter] = {
                 "activation_pattern": list(pattern),
-                "samples": []
+                "original_activations": [],
+                "samples": [],
             }
             pattern_counter += 1
-        
-        unique_patterns[pattern_index_map[pattern_tuple]]["samples"].append(idx)
+
+        unique_idx = pattern_index_map[pattern_tuple]
+        unique_patterns[unique_idx]["original_activations"].append(activations[idx].tolist())
+        unique_patterns[unique_idx]["samples"].append(idx)
+
         class_patterns[label][pattern_index_map[pattern_tuple]] += 1  
     
     results = {}

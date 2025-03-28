@@ -134,10 +134,10 @@ def cw_attack(model, inputs, labels, c=1e-4, kappa=0, max_iter=1000, lr=0.01):
     
     return torch.tanh(w + inputs).detach()
 
-def autoattack(model, inputs, labels, dataset):
+def autoattack(model, inputs, labels, dataset_name):
     """AutoAttack with dataset-specific epsilon values based on ICLR 2023 paper."""
     eps_dict = {"MNIST": 0.3, "F-MNIST": 0.1, "CIFAR-10": 0.0313}
-    eps = eps_dict.get(dataset, 0.0313)  # Default to CIFAR-10 if dataset is unknown
+    eps = eps_dict.get(dataset_name, 0.0313)  # Default to CIFAR-10 if dataset is unknown
     
     attacker = AutoAttack(model, norm='Linf', eps=eps, version="standard")
     adv_inputs = attacker(inputs, labels)
