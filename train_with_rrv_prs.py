@@ -64,7 +64,7 @@ def train():
                 warmup_epochs = config["warmup_epochs"]
                 total_epochs = config["epochs"]
                 # save_epochs = set(range(50, total_epochs + 1, 50))  # Save every 50 epochs
-                save_epochs = set(range(1, total_epochs + 1, 10))  # Save every epoch
+                save_epochs = set(range(warmup_epochs, total_epochs + 1, 10))  # Save every epoch
                 save_epochs.add(total_epochs)  # Ensure last epoch is saved
 
                 logger.info(f"Starting Training | Model: {modelname} | Dataset: {dataset_name} | Batch Size: {batch_size} | Warmup: {warmup_epochs}")
@@ -186,8 +186,9 @@ def train():
                         if len(activations["penultimate"]) > 0:
                             try:
                                 final_activations = torch.cat(activations["penultimate"], dim=0)
-                                mrv_loss = compute_rrv_loss(final_activations, labels, major_regions)
-                                loss += config["lambda_mrv"] * mrv_loss
+                                rrv_loss = compute_rrv_loss(final_activations, labels, major_regions)
+                                logger.info(f"Batch {batch_idx} | RRV Loss: {rrv_loss.item():.4f}")
+                                loss += config["lambda_mrv"] * rrv_loss
                             except Exception as e:
                                 logger.error(f"Error computing regularization loss: {e}")
                                 # Continue without regularization if there's an error
@@ -203,6 +204,10 @@ def train():
                         total_train += labels.size(0)
                         
                         batch_labels.append(labels.cpu().numpy())
+                        # Make sure the current batch's activations are added to penultimate for PRS tracking
+                        if 'current' in activations and activations["current"] is not None:
+                            activations["penultimate"].append(activations["current"].detach().cpu())
+
 
                     # Calculate train accuracy for this epoch
                     train_accuracy = 100 * correct_train / total_train  # Added missing calculation
@@ -230,13 +235,25 @@ def train():
                 
                     # Save checkpoint, compute major regions, and save every 50 epochs or last epoch
                     if epoch in save_epochs:
-                        major_regions, unique_patterns = compute_major_regions(final_epoch_activations, final_epoch_labels, num_classes=10, logger=logger)
-                        save_model_checkpoint(
-                            model, optimizer, modelname, dataset_name, batch_size, 
-                            metrics, logger, config=config, 
-                            extra_tag="RRV", epoch=epoch, prs_enabled=True,
-                            major_regions=major_regions, unique_patterns=unique_patterns
-                        )
+                        if len(activations["penultimate"]) > 0:
+                            # Safe to compute PRS stats
+                            final_epoch_activations = torch.cat(activations["penultimate"], dim=0).cpu().numpy()
+                            final_epoch_labels = np.concatenate(batch_labels, axis=0)
+
+                            major_regions, unique_patterns = compute_major_regions(
+                                final_epoch_activations, final_epoch_labels,
+                                num_classes=10, logger=logger
+                            )
+
+                            save_model_checkpoint(
+                                model, optimizer, modelname, dataset_name, batch_size,
+                                metrics, logger, config=config,
+                                extra_tag="RRV", epoch=epoch, prs_enabled=True,
+                                major_regions=major_regions, unique_patterns=unique_patterns
+                            )
+                        else:
+                            logger.warning(f"Epoch {epoch+1}: Skipping major region update and checkpoint due to missing activations.")
+
                 hook_handle.remove()  # Remove hooks after training
 
                 results[f"{dataset_name}_batch_{batch_size}"] = metrics

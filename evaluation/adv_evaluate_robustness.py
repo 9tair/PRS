@@ -21,7 +21,8 @@ from config import config
 from utils import fgsm_attack, bim_attack, pgd_attack, get_datasets, cw_attack, autoattack
 from models.model_factory import get_model
 
-
+def get_input_channels_from_dataset(dataset_name):
+    return 1 if dataset_name in ["MNIST", "FMNIST"] else 3
 
 def load_model_from_folder(folder, device="cuda"):
     """Loads a model and its metadata from a given folder."""
@@ -58,9 +59,13 @@ def load_model_from_folder(folder, device="cuda"):
 
     print(f"Loading model: {model_name} from {folder}")
 
+    # Determine input channels based on dataset
+    dataset_name = extract_dataset_name(folder) or "CIFAR10"
+    _, _, input_channels = get_datasets(dataset_name)
+
     # Create model architecture
-    model = get_model(model_name, input_channels=3)  # Ensure input_channels is explicitly provided
-    
+    model = get_model(model_name, input_channels=input_channels)
+
     # Find model checkpoint file (avoiding optimizer.pth)
     checkpoint_file = None
     for file in os.listdir(folder):
@@ -129,9 +134,18 @@ def check_model_accuracy(model, data_loader, device):
     return accuracy
 
 def denormalize(tensor, mean, std):
-    mean = mean.clone().detach().view(3, 1, 1)
-    std = std.clone().detach().view(3, 1, 1)
-    return tensor * std + mean  # Reverse normalization
+    # Get the number of channels from the mean tensor
+    num_channels = mean.size(0)
+    
+    # Reshape according to number of channels
+    if num_channels == 1:  # For grayscale (MNIST, FMNIST)
+        mean = mean.view(1, 1, 1)
+        std = std.view(1, 1, 1)
+    else:  # For RGB (CIFAR10, etc.)
+        mean = mean.view(3, 1, 1)
+        std = std.view(3, 1, 1)
+        
+    return tensor * std + mean
 
 def save_image_safely(tensor, filepath, dataset="CIFAR10"):
     """Safely saves an image with proper error handling."""
@@ -363,10 +377,12 @@ def extract_dataset_name(folder_path):
     Extracts the dataset name from the folder path.
     Assumes dataset name follows a standard convention.
     """
-    match = re.search(r"CIFAR10|MNIST|FMNIST", folder_path)  # Add other dataset names if needed
+    match = re.search(r"CIFAR10|MNIST|F[-_]?MNIST", folder_path)
     if match:
-        return match.group(0)
-    return None
+        name = match.group(0)
+        if name in ["F-MNIST", "FMNIST", "F_MNIST"]:
+            return "F-MNIST"
+        return name
 
 def main():
     """Main function to evaluate adversarial robustness for a single model."""
@@ -402,8 +418,10 @@ def main():
             model_name = "ResNet18"
         
         print(f"Creating model architecture: {model_name}")
-        model = get_model(model_name, input_channels=3)
-        
+        dataset_name = extract_dataset_name(args.folder) or "CIFAR10"
+        _, _, input_channels = get_datasets(dataset_name)
+        model = get_model(model_name, input_channels=input_channels)
+
         # If specific model file is provided, use it
         if args.model_file:
             model_path = args.model_file

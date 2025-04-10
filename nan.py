@@ -160,7 +160,8 @@ def train():
                                 metrics, logger, config=config, 
                                 epoch=epoch + 1,
                                 major_regions=major_regions, 
-                                unique_patterns=unique_patterns
+                                unique_patterns=unique_patterns,
+                                extra_tag="nan"
                             )
                         else:
                             logger.error(f"Cannot compute major regions for epoch {epoch+1} - no activations collected")

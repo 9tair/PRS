@@ -18,12 +18,18 @@ def register_activation_hook(model, activations, model_name, dataset_name, batch
     """
 
     def hook_fn(module, input, output):
-        """Hook function to track activations and detect NaNs."""
         if torch.isnan(output).any():
             logger.warning(f"NaN detected | Model: {model_name} | Dataset: {dataset_name} | Batch Size: {batch_size}")
-            activations["skip_batch"] = True  # 🚨 Skip batch if NaNs detected
+            activations["skip_batch"] = True
+            return
 
-        activations["penultimate"].append(output.detach())  # 🔹 Keep activations in torch format
+        if output.dim() > 2:
+            output = torch.flatten(output, start_dim=1)
+
+        output = output.detach()
+        activations["penultimate"].append(output)
+        activations["current"] = output  # This is needed for loss functions
+
 
     activations["skip_batch"] = False  
     hook_handle = None

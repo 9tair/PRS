@@ -9,7 +9,7 @@ from tqdm import tqdm
 from models import get_model
 from utils import (
     get_datasets, evaluate, compute_unique_activations, 
-    register_activation_hook, compute_major_regions, save_major_regions,
+    register_activation_hook, compute_major_regions,
     save_model_checkpoint, set_seed
 )
 from utils.logger import setup_logger  

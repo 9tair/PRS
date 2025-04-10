@@ -4,25 +4,19 @@ import torch
 import json
 import os
 from collections import defaultdict
-from config import config  # Import config dictionary
+from config import config 
 
 def compute_major_regions(activations, labels, num_classes, logger):
     """
     Computes Major Region (MR), Extra Regions (ER), Relaxed Decision Region (RDR) masks, 
     and Relaxed Region Vector (RRV) for each class.
 
-    Args:
-        activations (numpy.ndarray): Original activation patterns of shape (num_samples, num_features).
-        labels (numpy.ndarray): Ground-truth class labels of shape (num_samples,).
-        num_classes (int): Number of classes.
-        logger (Logger): Logger for debugging and info logging.
-
     Returns:
-        dict: Dictionary containing MR, ER, RDR masks, RRV, and summary statistics per class.
-        dict: Dictionary mapping unique activation patterns to sample indices.
+        dict: Per-class results with MR, ER, RDR, RRV, and added region label distributions.
+        dict: Unique activation pattern to sample + label map.
     """
-    RDR_AGREEMENT_THRESHOLD = config["rdr_agreement_threshold"]  # Use threshold from config
-    
+    RDR_AGREEMENT_THRESHOLD = config["rdr_agreement_threshold"]
+
     logger.info(f"Activations shape: {activations.shape}")
     logger.info(f"Labels shape: {labels.shape}")
     logger.info(f"Number of classes: {num_classes}")
@@ -31,68 +25,101 @@ def compute_major_regions(activations, labels, num_classes, logger):
     unique_patterns = {}
     pattern_index_map = {}
     class_samples = {c: [] for c in range(num_classes)}
-    
+
     binary_activations = np.sign(activations)
-    binary_activations[binary_activations == 0] = -1  # Convert zeros to -1
-    
-    pattern_counter = 0  
+    binary_activations[binary_activations == 0] = -1
+
+    pattern_counter = 0
 
     for idx, (pattern, label) in enumerate(zip(binary_activations, labels)):
         pattern_tuple = tuple(pattern)
         class_samples[label].append(idx)
-        
+
         if pattern_tuple not in pattern_index_map:
             pattern_index_map[pattern_tuple] = pattern_counter
             unique_patterns[pattern_counter] = {
                 "activation_pattern": list(pattern),
                 "original_activations": [],
                 "samples": [],
+                "labels": []  # Track all labels in this pattern
             }
             pattern_counter += 1
 
         unique_idx = pattern_index_map[pattern_tuple]
         unique_patterns[unique_idx]["original_activations"].append(activations[idx].tolist())
         unique_patterns[unique_idx]["samples"].append(idx)
+        unique_patterns[unique_idx]["labels"].append(int(label))  # Track label
 
-        class_patterns[label][pattern_index_map[pattern_tuple]] += 1  
-    
+        class_patterns[label][unique_idx] += 1
+
     results = {}
 
     for c in range(num_classes):
-        if not class_patterns[c]:  
-            continue  
-    
+        if not class_patterns[c]:
+            continue
+
         sorted_patterns = sorted(class_patterns[c].items(), key=lambda x: x[1], reverse=True)
-        major_pattern_index, major_samples = sorted_patterns[0]  
-        extra_regions = [{"activation_index": idx, "count": count} for idx, count in sorted_patterns[1:]]
-        
-        # Compute MRV (Mean Region Vector) - average of all activations for this class
-        mrv = activations[class_samples[c]].mean(axis=0)
-        
-        # Compute RDR mask using majority agreement
+        major_pattern_index, major_samples = sorted_patterns[0]
+
+        # Extra regions with label distribution
+        extra_regions = []
+        for idx, count in sorted_patterns[1:]:
+            region_labels = unique_patterns[idx]["labels"]
+            labels, counts = np.unique(region_labels, return_counts=True)
+            label_distribution = {int(k): int(v) for k, v in zip(labels, counts)}
+            
+            # FIXED: Verify that the sum of distribution counts equals the total samples in this pattern
+            total_samples_in_pattern = len(unique_patterns[idx]["samples"])
+            
+            extra_regions.append({
+                "activation_index": idx,
+                "count": count,  # This is only the count for class c
+                "total_pattern_samples": total_samples_in_pattern,  # This is the total number of samples with this pattern
+                "class_distribution": label_distribution  # Distribution across all classes
+            })
+
+        major_region_indices = unique_patterns[major_pattern_index]["samples"]
+        mrv = activations[major_region_indices].mean(axis=0)
+
         pattern_matrix = np.array([np.array(unique_patterns[idx]["activation_pattern"]) for idx, _ in sorted_patterns])
-        
-        # Feature must have the same sign for at least RDR_AGREEMENT_THRESHOLD % of samples
         sign_consistency = (np.mean(pattern_matrix == np.sign(np.sum(pattern_matrix, axis=0)), axis=0)) >= RDR_AGREEMENT_THRESHOLD
         classwise_rdr_mask = sign_consistency.astype(int)
 
-        #Fixed: Compute RRV using indexing instead of multiplication
-        rrv = np.zeros_like(mrv)  # Initialize with zeros
-        rrv[classwise_rdr_mask == 1] = mrv[classwise_rdr_mask == 1]  # Select only masked values
+        # New RRV computation based only on RDR mask and all class samples
+        rrv = np.zeros_like(mrv)
+
+        # Get all activations for samples of this class
+        class_indices = class_samples[c]
+        class_activations = activations[class_indices]  # Shape: (N_class_samples, feature_dim)
+
+        # Only compute mean for dimensions where RDR mask is 1
+        for dim_index, is_consistent in enumerate(classwise_rdr_mask):
+            if is_consistent:
+                rrv[dim_index] = class_activations[:, dim_index].mean()
+
+        # Class distribution in major region
+        major_region_labels = unique_patterns[major_pattern_index]["labels"]
+        labels, counts = np.unique(major_region_labels, return_counts=True)
+        major_distribution = {int(k): int(v) for k, v in zip(labels, counts)}
+        
+        # FIXED: Verify that the sum of distribution counts equals the total samples in the major pattern
+        total_samples_in_major_pattern = len(unique_patterns[major_pattern_index]["samples"])
 
         results[f"class_{c}"] = {
             "num_total_samples": sum(class_patterns[c].values()),
             "num_decision_regions": len(class_patterns[c]),
             "major_region": {
-                "count": major_samples,
-                "activation_index": major_pattern_index
+                "count": major_samples,  # This is only the count for class c
+                "total_pattern_samples": total_samples_in_major_pattern,  # This is the total count across all classes
+                "activation_index": major_pattern_index,
+                "class_distribution": major_distribution  # Distribution across all classes
             },
             "extra_regions": extra_regions,
             "mrv": mrv.tolist(),
             "rdr_mask": classwise_rdr_mask.tolist(),
             "rrv": rrv.tolist()
         }
-        
+
     return results, unique_patterns
 
 def save_major_regions(major_regions, unique_patterns, dataset_name, batch_size, model_name, logger, prs_enabled=False, rrv_enabled=False, nan_enabled=False, warmup_epochs=50):
