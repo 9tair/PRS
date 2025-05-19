@@ -1,7 +1,7 @@
 import logging
 import sys
 from utils.logger import setup_logger  
-from train import train
+from project_root.cnn6 import train
 
 if __name__ == "__main__":
     logger = setup_logger("MAIN", "ALL", "NA")  # Main logger for general errors

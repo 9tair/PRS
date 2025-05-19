@@ -1,112 +1,81 @@
 import torch
 import torch.nn.functional as F
 
-def compute_mrv_loss(activations, labels, major_regions):
-    """
-    Computes the Major Region Variance (MRV) Loss.
-
-    Args:
-        activations (torch.Tensor): Model activations (batch_size, feature_dim).
-        labels (torch.Tensor): True class labels (batch_size).
-        major_regions (dict): Precomputed major region activations per class.
-
-    Returns:
-        torch.Tensor: MRV loss.
-    """
+def compute_mrv_loss(activations, labels, predictions, major_regions, logger):
     device = activations.device
-    loss = 0.0
-    
-    # Ensure we use the correct batch size (minimum of activations and labels length)
-    num_samples = min(activations.shape[0], labels.shape[0])
-
-    # Preload MRVs as tensors (avoid modifying major_regions dictionary)
-    precomputed_mrv = {
-        f"class_{class_id}": torch.tensor(mr["mrv"], device=device, dtype=activations.dtype)
-        for class_id, mr in major_regions.items()
-    }
+    total_loss = torch.tensor(0.0, device=device)
+    num_samples = min(activations.size(0), labels.size(0))
+    valid_samples = 0
 
     for i in range(num_samples):
-        class_id = f"class_{labels[i].item()}"
-        if class_id in precomputed_mrv:
-            loss += F.mse_loss(activations[i], precomputed_mrv[class_id])
+        true_class = labels[i].item()
+        pred_class = predictions[i].item()
+        class_key = f"class_{true_class}"
 
-    return loss / num_samples  # Normalize by batch size
+        # Only apply if prediction is correct and MRV exists
+        if pred_class == true_class and class_key in major_regions:
+            try:
+                mrv = torch.tensor(major_regions[class_key]["mrv"], device=device, dtype=activations.dtype)
+                activation_i = activations[i]
+                mse = F.mse_loss(activation_i, mrv)
 
-def compute_hamming_loss(activations, labels, major_regions):
-    """
-    Computes the Hamming Distance Loss to reduce unnecessary activation patterns.
+                if torch.isfinite(mse):
+                    total_loss += mse
+                    valid_samples += 1
+            except Exception as e:
+                logger.warning(f"[MRV Skipped] Sample {i}: {e}")
 
-    Args:
-        activations (torch.Tensor): Model activations (batch_size, feature_dim).
-        labels (torch.Tensor): True class labels (batch_size).
-        major_regions (dict): Precomputed major region activations per class.
+    if valid_samples == 0:
+        return torch.tensor(0.0, device=device)
+    return total_loss / valid_samples
 
-    Returns:
-        torch.Tensor: Hamming loss.
-    """
+def compute_hamming_loss(activations, labels, predictions, major_regions, k=10.0):
     device = activations.device
-    loss = 0.0
-    
-    # Ensure we use the correct batch size
-    num_samples = min(activations.shape[0], labels.shape[0])
+    total_loss = torch.tensor(0.0, device=device)
+    valid_samples = 0
 
-    # Convert activations to binary (-1, +1)
-    binary_activations = torch.sign(activations)
-    binary_activations[binary_activations == 0] = -1  # Replace 0s with -1
+    for i in range(activations.size(0)):
+        true_class = labels[i].item()
+        pred_class = predictions[i].item()
+        class_key = f"class_{true_class}"
 
-    # Precompute binary MRVs
-    precomputed_mrv_bin = {
-        f"class_{class_id}": torch.sign(torch.tensor(mr["mrv"], device=device)).int()
-        for class_id, mr in major_regions.items()
-    }
+        if pred_class == true_class and class_key in major_regions:
+            try:
+                mrv = torch.tensor(major_regions[class_key]["mrv"], device=device, dtype=activations.dtype)
+                mrv_approx = k * torch.tanh(mrv)
+                act_approx = k * torch.tanh(activations[i])
+                euclidean_dist = F.mse_loss(act_approx, mrv_approx, reduction="mean")  # normalized per-dim
+                total_loss += euclidean_dist
+                valid_samples += 1
+            except:
+                continue
 
-    for i in range(num_samples):
-        class_id = f"class_{labels[i].item()}"
-        if class_id in precomputed_mrv_bin:
-            hamming_dist = torch.sum((binary_activations[i].int() != precomputed_mrv_bin[class_id]).int()).float()
-            loss += hamming_dist
-
-    return loss / num_samples  # Normalize by batch size
+    return total_loss / valid_samples if valid_samples > 0 else torch.tensor(0.0, device=device)
 
 def compute_rrv_loss(activations, labels, major_regions):
     """
     Computes the Relaxed Region Vector (RRV) Loss.
+    Penalizes deviation from the RRV on selected feature dimensions using RDR mask.
 
     Args:
-        activations (torch.Tensor): Model activations (batch_size, feature_dim).
-        labels (torch.Tensor): True class labels (batch_size).
-        major_regions (dict): Precomputed major region activations per class.
+        activations (torch.Tensor): (batch_size, feature_dim)
+        labels (torch.Tensor): (batch_size,)
+        major_regions (dict): Dictionary containing RRV and RDR mask per class
 
     Returns:
-        torch.Tensor: RRV loss.
+        torch.Tensor: RRV loss value
     """
     device = activations.device
-    loss = 0.0
-    
-    # Ensure correct batch size handling
-    num_samples = min(activations.shape[0], labels.shape[0])
-
-    # Preload RRV and RDR mask as tensors
-    precomputed_rrv = {
-        class_key: torch.tensor(mr["rrv"], device=device) 
-        for class_key, mr in major_regions.items()
-    }
-
-    precomputed_rdr_mask = {
-        class_key: torch.tensor(mr["rdr_mask"], device=device) 
-        for class_key, mr in major_regions.items()
-    }
+    total_loss = torch.tensor(0.0, device=device)
+    num_samples = min(activations.size(0), labels.size(0))
 
     for i in range(num_samples):
-        class_id = f"class_{labels[i].item()}"
-        if class_id in precomputed_rrv and class_id in precomputed_rdr_mask:
-            rrv = precomputed_rrv[class_id]
-            rdr_mask = precomputed_rdr_mask[class_id]
-            
-            # Apply the RDR mask to the activations
-            masked_activations = activations[i] * rdr_mask
-            
-            # Compute MSE loss only on the masked coordinates
-            loss += F.mse_loss(masked_activations, rrv)
+        class_key = f"class_{labels[i].item()}"
+        if class_key in major_regions:
+            rrv = torch.tensor(major_regions[class_key]["rrv"], device=device, dtype=activations.dtype)
+            rdr_mask = torch.tensor(major_regions[class_key]["rdr_mask"], device=device, dtype=activations.dtype)
 
-    return loss / num_samples  # Normalize by batch size
+            masked_act = activations[i] * rdr_mask
+            total_loss += F.mse_loss(masked_act, rrv)
+
+    return total_loss / num_samples if num_samples > 0 else torch.tensor(0.0, device=device)
