@@ -64,6 +64,8 @@ def train():
     for modelname in tqdm(config['models'], desc="Model Loop"):
         for dataset_name in tqdm(config["datasets"], desc="Dataset Loop"):
             for batch_size in tqdm(config["batch_sizes"], desc="Batch Sizes Loop"):
+                
+                # Initialize dynamic logger for this setting
                 logger = setup_logger(modelname, dataset_name, batch_size)
                 warmup_epochs = config["warmup_epochs"]
                 total_epochs = config["epochs"]
@@ -74,6 +76,7 @@ def train():
                 logger.info(f"Using lr={base_lr}, weight_decay={weight_decay}")
 
                 train_dataset, test_dataset, input_channels = get_datasets(dataset_name)
+                train_dataset_size = len(train_dataset)
                 train_loader = DataLoader(
                     train_dataset, batch_size=batch_size, shuffle=True, 
                     worker_init_fn=lambda _: np.random.seed(config["seed"]),
@@ -104,11 +107,7 @@ def train():
                     "mrv_loss": [],
                     "hamming_loss": []
                 }
-                activations = {
-                    "penultimate": [],   
-                    "skip_batch": False,
-                    "current": None
-                }
+                activations = {"penultimate": [], "skip_batch": False}
                 hook_handle = register_activation_hook(model, activations, modelname, dataset_name, batch_size, logger)
                 
                 # Load checkpoint **only once at the beginning**
@@ -137,15 +136,13 @@ def train():
                     start_epoch = 0
                     # ===========================
                     # WARM-UP STAGE
-                    # ===========================                    
+                    # ===========================
+                    logger.info(f"Starting warm-up phase: {warmup_epochs} epochs")
+                    
                     for epoch in tqdm(range(warmup_epochs), desc=f"Warm-up Training {dataset_name} | Batch {batch_size}"):
                         model.train()
                         epoch_loss, correct_train, total_train = 0, 0, 0
-                        activations = {
-                            "penultimate": [],   
-                            "skip_batch": False,
-                            "current": None
-                        }
+                        activations["penultimate"].clear()
                         batch_labels = []
                         
                         current_lr = scheduler.get_last_lr()[0]
@@ -156,11 +153,19 @@ def train():
                             activations["skip_batch"] = False
                             inputs, labels = inputs.to(config["device"]), labels.to(config["device"])
                             
+                            # Reset gradients before each batch
                             optimizer.zero_grad()
-                            with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu"):
+                            
+                            # Forward pass with mixed precision
+                            with torch.amp.autocast("cuda"):
                                 outputs = model(inputs)
                                 loss = criterion(outputs, labels)
 
+                            if activations["skip_batch"]:
+                                logger.warning(f"Skipping NaN batch | Warm-up Epoch: {epoch+1} | Batch: {batch_idx}")
+                                continue  # Skip problematic batch
+
+                            # Backward pass with gradient scaling
                             scaler.scale(loss).backward()
                             
                             # Check for NaN gradients before optimizer step
@@ -179,12 +184,11 @@ def train():
                             scaler.update()
 
                             epoch_loss += loss.item()
+                            batch_labels.append(labels.cpu().numpy())
 
                             _, predicted = outputs.max(1)
                             correct_train += (predicted == labels).sum().item()
                             total_train += labels.size(0)
-                            
-                            batch_labels.append(labels.cpu().numpy())
                         
                         # Update learning rate scheduler at the end of each epoch
                         scheduler.step()
@@ -192,29 +196,37 @@ def train():
                         train_accuracy = 100 * correct_train / total_train if total_train > 0 else 0
 
                         # Process warm-up activations
-                        if len(activations["penultimate"]) > 0:
-                            final_epoch_activations = torch.cat([t.cpu() for t in activations["penultimate"]], dim=0).numpy()
+                        if activations["penultimate"]:  # Check if list is not empty
+                            final_epoch_activations = torch.cat(activations["penultimate"], dim=0).cpu().numpy()
                             final_epoch_labels = np.concatenate(batch_labels, axis=0)
-                            prs_ratio = compute_unique_activations(final_epoch_activations, logger) / len(train_dataset)
+                            prs_ratio = compute_unique_activations(final_epoch_activations, logger) / train_dataset_size
                             metrics["prs_ratios"].append(prs_ratio)
+                            metrics["mrv_loss"].append(0.0)
+                            metrics["hamming_loss"].append(0.0)
                         else:
                             logger.warning(f"No activations collected in warm-up epoch {epoch+1}")
                             metrics["prs_ratios"].append(0.0)
+                            metrics["mrv_loss"].append(0.0)
+                            metrics["hamming_loss"].append(0.0)
+                            final_epoch_activations = None
+                            final_epoch_labels = None
 
                         hook_handle.remove()  # Remove hook during evaluation
                         test_accuracy = evaluate(model, test_loader, config["device"])
                         hook_handle = register_activation_hook(model, activations, modelname, dataset_name, batch_size, logger)
                                             
+                        # Store Metrics
                         metrics["epoch"].append(epoch + 1)
                         metrics["train_accuracy"].append(train_accuracy)
                         metrics["test_accuracy"].append(test_accuracy)
                         logger.info(f"Warm-up Epoch {epoch+1}/{warmup_epochs} | Loss: {epoch_loss:.4f} | Train Acc: {train_accuracy:.2f}% | Test Acc: {test_accuracy:.2f}% | PRS Ratio: {prs_ratio:.4f}")
 
                     # Compute Major Regions after warm-up stage
-                    if len(activations["penultimate"]) > 0:
+                    if final_epoch_activations is not None and final_epoch_labels is not None:
+                        logger.info("Computing major regions after warm-up phase")
                         major_regions, unique_patterns = compute_major_regions(final_epoch_activations, final_epoch_labels, num_classes=10, logger=logger)
                     else:
-                        logger.error("No activations collected during warm-up. Cannot compute major regions.")
+                        logger.error("Unable to compute major regions: no activations available after warm-up")
                         continue  # Skip to next configuration if we can't compute major regions
                 
                 # ===========================
@@ -241,12 +253,9 @@ def train():
                 logger.info(f"Starting PRS regularization phase: {config['epochs'] - warmup_epochs} epochs")
                 
                 for epoch in tqdm(range(start_epoch, config["epochs"]), desc=f"PRS Training {dataset_name} | Batch {batch_size}"):
-                    logged_activation_shape = False
-                    logged_loss_values = False
                     model.train()
                     epoch_loss, correct_train, total_train = 0, 0, 0
-                    total_mrv_loss, total_hamming_loss = 0.0, 0.0
-
+                    epoch_mrv_loss, epoch_hamming_loss = 0, 0
                     activations["penultimate"].clear()
                     batch_labels = []
                     
@@ -254,48 +263,49 @@ def train():
                     metrics["learning_rates"].append(current_lr)
                     logger.info(f"PRS Epoch {epoch+1}/{config['epochs']} | Model: {modelname} | Dataset: {dataset_name} | LR: {current_lr:.6f}")
 
-                    error_logged = False
                     for batch_idx, (inputs, labels) in enumerate(train_loader):
-                        activations["current"] = None
                         activations["skip_batch"] = False
                         inputs, labels = inputs.to(config["device"]), labels.to(config["device"])
                         optimizer.zero_grad()
                         
                         # Forward pass with mixed precision
-                        with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu"):
+                        with torch.amp.autocast("cuda"):
                             outputs = model(inputs)
                             loss = criterion(outputs, labels)
                             
-                        if activations["current"] is not None:
-                            try:
-                                if not logged_activation_shape:
-                                    logger.debug(f"[ACTIVATION] Shape: {activations['current'].shape}, Labels shape: {labels.shape}")
-                                    logged_activation_shape = True
-                                    
-                                mrv_loss = compute_mrv_loss(activations["current"], labels, major_regions, logger)
-                                hamming_loss = compute_hamming_loss(activations["current"], labels, major_regions)
+                            # Add PRS regularization losses
+                            if len(activations["penultimate"]) > 0:
+                                batch_activations = torch.cat(activations["penultimate"], dim=0)
                                 
-                                if not logged_loss_values:
-                                    logger.debug(f"[LOSS RAW] MRV: {mrv_loss.item():.6f}, Hamming: {hamming_loss.item():.6f}")
-                                    logged_loss_values = True
+                                # Compute MRV and Hamming losses
+                                mrv_loss = compute_mrv_loss(batch_activations, labels, major_regions, logger=logger)
+                                hamming_loss = compute_hamming_loss(batch_activations, labels, major_regions, logger=logger)
+                                
+                                # Scale and add regularization losses
+                                # Check if the losses are already tensor objects or scalars
+                                if isinstance(mrv_loss, torch.Tensor):
+                                    scaled_mrv_loss = config["lambda_mrv"] * mrv_loss
+                                    epoch_mrv_loss += scaled_mrv_loss.item()
+                                else:
+                                    scaled_mrv_loss = config["lambda_mrv"] * mrv_loss
+                                    epoch_mrv_loss += scaled_mrv_loss
+                                
+                                if isinstance(hamming_loss, torch.Tensor):
+                                    scaled_hamming_loss = config["lambda_hamming"] * hamming_loss
+                                    epoch_hamming_loss += scaled_hamming_loss.item()
+                                else:
+                                    scaled_hamming_loss = config["lambda_hamming"] * hamming_loss
+                                    epoch_hamming_loss += scaled_hamming_loss
+                                
+                                # Add regularization to main loss
+                                loss += scaled_mrv_loss + scaled_hamming_loss
 
-                                # Add losses to total
-                                mrv_loss_value = mrv_loss.item() if hasattr(mrv_loss, 'item') else mrv_loss
-                                hamming_loss_value = hamming_loss.item() if hasattr(hamming_loss, 'item') else hamming_loss
+                        if activations["skip_batch"]:
+                            logger.warning(f"Skipping NaN batch | PRS Epoch: {epoch+1} | Batch: {batch_idx}")
+                            continue  # Skip problematic batch
 
-                                total_mrv_loss += mrv_loss_value
-                                total_hamming_loss += hamming_loss_value
-
-                                # Add to main loss
-                                loss += config["lambda_mrv"] * mrv_loss + config["lambda_hamming"] * hamming_loss
-                            except Exception as e:
-                                if not error_logged:
-                                    logger.error(f"Error computing regularization loss: {e}")
-                                    error_logged = True  # Don't log again this epoch
-
-                        # Store current batch's activations for PRS metrics
-                        if activations["current"] is not None:
-                            activations["penultimate"].append(activations["current"].detach().cpu())
+                        # Backward pass with gradient scaling
+                        scaler.scale(loss).backward()
                         
                         # Check for NaN gradients before optimizer step
                         if any(torch.isnan(param.grad).any() for param in model.parameters() if param.grad is not None):
@@ -305,8 +315,7 @@ def train():
                             continue
                         
                         epoch_loss += loss.item()
-
-                        scaler.scale(loss).backward()
+                        
                         scaler.unscale_(optimizer)
                         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                         scaler.step(optimizer)
@@ -322,15 +331,24 @@ def train():
                     scheduler.step()
                     
                     # Process PRS stage activations
-                    if len(activations["penultimate"]) > 0:
-                        final_epoch_activations = torch.cat([t.cpu() for t in activations["penultimate"]], dim=0).numpy()
+                    if activations["penultimate"]:  # Check if list is not empty
+                        final_epoch_activations = torch.cat(activations["penultimate"], dim=0).cpu().numpy()
                         final_epoch_labels = np.concatenate(batch_labels, axis=0)
-                        prs_ratio = compute_unique_activations(final_epoch_activations, logger) / len(train_dataset)
+
+                        # Compute PRS Ratio
+                        prs_ratio = compute_unique_activations(final_epoch_activations, logger) / train_dataset_size
                         metrics["prs_ratios"].append(prs_ratio)
                         
+                        # Record regularization losses
+                        metrics["mrv_loss"].append(epoch_mrv_loss)
+                        metrics["hamming_loss"].append(epoch_hamming_loss)
                     else:
                         logger.warning(f"No activations collected in PRS epoch {epoch+1}")
                         metrics["prs_ratios"].append(0.0)
+                        metrics["mrv_loss"].append(0.0)
+                        metrics["hamming_loss"].append(0.0)
+                        final_epoch_activations = None
+                        final_epoch_labels = None
 
                     # Evaluate on Test Set during PRS stage
                     hook_handle.remove()  # Remove hook during evaluation
@@ -344,34 +362,21 @@ def train():
                     metrics["train_accuracy"].append(train_accuracy)
                     metrics["test_accuracy"].append(test_accuracy)
                     
-                    avg_mrv_loss = total_mrv_loss / len(train_loader)
-                    avg_hamming_loss = total_hamming_loss / len(train_loader)
-                    logger.info(f"Epoch {epoch+1}/{config['epochs']} | Loss: {epoch_loss:.4f} | Train Acc: {train_accuracy:.2f}% | Test Acc: {test_accuracy:.2f}% | Avg MRV Loss: {avg_mrv_loss} | Avg Hamming Loss: {avg_hamming_loss}")
-                    
-                    # Save checkpoint, compute major regions, and save every 50 epochs or last epoch
+                    logger.info(f"PRS Epoch {epoch+1}/{config['epochs']} | Loss: {epoch_loss:.4f} | Train Acc: {train_accuracy:.2f}% | Test Acc: {test_accuracy:.2f}% | PRS Ratio: {prs_ratio:.4f} | MRV Loss: {epoch_mrv_loss:.4f} | Hamming Loss: {epoch_hamming_loss:.4f}")
+
+                    # Compute and Save MR/ER using final epoch activations
                     if epoch in save_epochs:
-                        if len(activations["penultimate"]) > 0:
-                            final_epoch_activations = torch.cat([t.cpu() for t in activations["penultimate"]], dim=0).numpy()
-                            final_epoch_labels = np.concatenate(batch_labels, axis=0)
-
-                            major_regions, unique_patterns = compute_major_regions(
-                                final_epoch_activations, final_epoch_labels,
-                                num_classes=10, logger=logger
-                            )
-                            for class_id, mr in major_regions.items():
-                                if "mrv" in mr:
-                                    logger.debug(f"[MRV DEBUG] Class {class_id} MRV shape: {np.shape(mr['mrv'])}")
-                                else:
-                                    logger.warning(f"[MRV MISSING] Class {class_id} has no MRV!")
-
+                        if final_epoch_activations is not None and final_epoch_labels is not None:
+                            logger.info("Computing final major regions after PRS phase")
+                            major_regions, unique_patterns = compute_major_regions(final_epoch_activations, final_epoch_labels, num_classes=10, logger=logger)
                             save_model_checkpoint(
-                                model, optimizer, modelname, dataset_name, batch_size,
-                                metrics, logger, config=config,
+                                model, optimizer, modelname, dataset_name, batch_size, 
+                                metrics, logger, config=config, 
                                 extra_tag=None, epoch=epoch, prs_enabled=True,
                                 major_regions=major_regions, unique_patterns=unique_patterns
                             )
                         else:
-                            logger.warning(f"Skipping PRS region computation and checkpoint save at epoch {epoch} due to empty activations.")
+                            logger.warning("Unable to compute final major regions: no activations available")
                         
                 # Remove hook after training
                 hook_handle.remove()

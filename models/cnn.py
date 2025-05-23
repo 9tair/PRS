@@ -25,6 +25,7 @@ class CustomCNN(nn.Module):
             nn.ReLU()
         )
 
+        # Classifier with LayerNorm on penultimate features
         self.classifier = nn.Sequential(
             nn.Flatten(),
             nn.Linear(64 * 4 * 4, 512),

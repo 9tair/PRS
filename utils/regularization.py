@@ -1,81 +1,99 @@
 import torch
 import torch.nn.functional as F
+import numpy as np
+from typing import Dict, Any
 
-def compute_mrv_loss(activations, labels, predictions, major_regions, logger):
+def compute_mrv_loss(
+    activations: torch.Tensor,
+    labels: torch.Tensor,
+    major_regions: Dict[str, Any],
+    logger: Any
+) -> torch.Tensor:
+    if activations is None or labels is None or major_regions is None or logger is None:
+        return torch.tensor(0.0, device='cpu', requires_grad=True)
+
+    if not isinstance(activations, torch.Tensor) or not isinstance(labels, torch.Tensor):
+        logger.error("[MRV Loss] Activations or labels are not torch tensors.")
+        return torch.tensor(0.0, device='cpu', requires_grad=True)
+
     device = activations.device
-    total_loss = torch.tensor(0.0, device=device)
-    num_samples = min(activations.size(0), labels.size(0))
-    valid_samples = 0
+    batch_size, feature_dim = activations.shape
 
-    for i in range(num_samples):
-        true_class = labels[i].item()
-        pred_class = predictions[i].item()
-        class_key = f"class_{true_class}"
+    total_loss = 0.0
+    valid_sample_count = 0
 
-        # Only apply if prediction is correct and MRV exists
-        if pred_class == true_class and class_key in major_regions:
+    for i in range(batch_size):
+        cls = labels[i].item()
+        key = f"class_{cls}"
+        mrv = major_regions.get(key, {}).get("mrv", None)
+
+        if isinstance(mrv, (list, np.ndarray)) and len(mrv) == feature_dim:
             try:
-                mrv = torch.tensor(major_regions[class_key]["mrv"], device=device, dtype=activations.dtype)
-                activation_i = activations[i]
-                mse = F.mse_loss(activation_i, mrv)
+                mrv_tensor = torch.tensor(mrv, device=device, dtype=torch.float32)
 
-                if torch.isfinite(mse):
-                    total_loss += mse
-                    valid_samples += 1
+                if not torch.isfinite(mrv_tensor).all():
+                    continue
+
+                # Create a mask for positive MRV values
+                positive_mask = mrv_tensor > 0
+
+                # Apply the mask to both activation and MRV
+                filtered_mrv = mrv_tensor[positive_mask]
+                filtered_activation = activations[i][positive_mask]
+
+                if filtered_mrv.numel() == 0:
+                    continue  # No valid values to compute loss
+
+                sample_loss = F.mse_loss(filtered_activation, filtered_mrv, reduction='mean')
+                total_loss += sample_loss
+                valid_sample_count += 1
+
             except Exception as e:
-                logger.warning(f"[MRV Skipped] Sample {i}: {e}")
-
-    if valid_samples == 0:
-        return torch.tensor(0.0, device=device)
-    return total_loss / valid_samples
-
-def compute_hamming_loss(activations, labels, predictions, major_regions, k=10.0):
-    device = activations.device
-    total_loss = torch.tensor(0.0, device=device)
-    valid_samples = 0
-
-    for i in range(activations.size(0)):
-        true_class = labels[i].item()
-        pred_class = predictions[i].item()
-        class_key = f"class_{true_class}"
-
-        if pred_class == true_class and class_key in major_regions:
-            try:
-                mrv = torch.tensor(major_regions[class_key]["mrv"], device=device, dtype=activations.dtype)
-                mrv_approx = k * torch.tanh(mrv)
-                act_approx = k * torch.tanh(activations[i])
-                euclidean_dist = F.mse_loss(act_approx, mrv_approx, reduction="mean")  # normalized per-dim
-                total_loss += euclidean_dist
-                valid_samples += 1
-            except:
+                logger.warning(f"[MRV Loss] Skipping class {cls}: {e}")
                 continue
 
-    return total_loss / valid_samples if valid_samples > 0 else torch.tensor(0.0, device=device)
+    if valid_sample_count == 0:
+        return torch.tensor(0.0, device=device, requires_grad=True)
 
-def compute_rrv_loss(activations, labels, major_regions):
-    """
-    Computes the Relaxed Region Vector (RRV) Loss.
-    Penalizes deviation from the RRV on selected feature dimensions using RDR mask.
+    return total_loss / valid_sample_count
 
-    Args:
-        activations (torch.Tensor): (batch_size, feature_dim)
-        labels (torch.Tensor): (batch_size,)
-        major_regions (dict): Dictionary containing RRV and RDR mask per class
+def compute_hamming_loss(activations: torch.Tensor, labels: torch.Tensor,
+                         major_regions: Dict[str, Any], logger: Any) -> torch.Tensor:
+    if activations is None or labels is None or major_regions is None or logger is None:
+        return torch.tensor(0.0, device='cpu', requires_grad=True)
 
-    Returns:
-        torch.Tensor: RRV loss value
-    """
+    if not isinstance(activations, torch.Tensor) or not isinstance(labels, torch.Tensor):
+        logger.error("[Hamming Loss] Activations or labels are not torch tensors.")
+        return torch.tensor(0.0, device='cpu', requires_grad=True)
+
     device = activations.device
-    total_loss = torch.tensor(0.0, device=device)
-    num_samples = min(activations.size(0), labels.size(0))
+    batch_size, feature_dim = activations.shape
 
-    for i in range(num_samples):
-        class_key = f"class_{labels[i].item()}"
-        if class_key in major_regions:
-            rrv = torch.tensor(major_regions[class_key]["rrv"], device=device, dtype=activations.dtype)
-            rdr_mask = torch.tensor(major_regions[class_key]["rdr_mask"], device=device, dtype=activations.dtype)
+    soft_activations = torch.tanh(activations)  # differentiable "soft sign"
+    target_patterns = []
 
-            masked_act = activations[i] * rdr_mask
-            total_loss += F.mse_loss(masked_act, rrv)
+    valid_activations = []
 
-    return total_loss / num_samples if num_samples > 0 else torch.tensor(0.0, device=device)
+    for i in range(batch_size):
+        cls = labels[i].item()
+        key = f"class_{cls}"
+        mrv = major_regions.get(key, {}).get("mrv", None)
+
+        if isinstance(mrv, (list, np.ndarray)) and len(mrv) == feature_dim:
+            try:
+                mrv_tensor = torch.tensor(mrv, device=device, dtype=torch.float32)
+                mrv_sign = torch.sign(mrv_tensor).detach()  # Fixed reference pattern
+                if not torch.isfinite(mrv_sign).all():
+                    continue
+                target_patterns.append(mrv_sign)
+                valid_activations.append(soft_activations[i])
+            except Exception as e:
+                logger.warning(f"[Hamming Loss] Skipping class {cls}: {e}")
+                continue
+
+    if not valid_activations:
+        return torch.tensor(0.0, device=device, requires_grad=True)
+
+    act_batch = torch.stack(valid_activations)
+    pattern_batch = torch.stack(target_patterns)
+    return F.mse_loss(act_batch, pattern_batch)

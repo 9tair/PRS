@@ -114,7 +114,7 @@ def train():
                         major_regions, unique_patterns = compute_major_regions(
                             all_activations, all_labels, num_classes=10, logger=logger
                         )
-                        tag = "_ls" if smoothing > 0 else None
+                        tag = "_norm_ls" if smoothing > 0 else None
                         save_model_checkpoint(
                             model, optimizer, modelname, dataset_name, batch_size,
                             metrics, logger, config=config,

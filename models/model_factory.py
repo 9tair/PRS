@@ -6,7 +6,7 @@ from models import CustomCNN  # Your existing CNN-6 model
 
 MODEL_SAVE_DIR = "models/saved"
 
-def get_model(model_name, input_channels=3):
+def get_model(model_name, input_channels=3, num_classes=10):
     """
     Returns the appropriate model based on the provided model_name.
 

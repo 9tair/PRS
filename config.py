@@ -28,20 +28,21 @@
 
 
 config = {
-    "models": ["VGG16"],  # Iterate through all model architectures
+    "models": ["CNN-6"],  # Iterate through all model architectures
     "datasets": ["CIFAR10"],  # Iterate through all datasets
     "batch_sizes": [128], # Iterate through multiple batch sizes
-    "epochs": 300,  # Set to the required number of epochs
-    "warmup_epochs": 300,
+    "epochs": 500,  # Set to the required number of epochs
+    "warmup_epochs": 400,
     "learning_rate": 1e-3,  # Learning rate for the optimizer
     "model_save_path": "models/",  # Directory to save trained models
     "results_save_path": "results/",  # Directory to save training results
-    "device": "cuda:0",  # Change to 'cpu' if GPU is unavailable
+    "device": "cuda:3",  # Change to 'cpu' if GPU is unavailable
     "seed": 375,  # Seed for reproducibility
     "test_batch_size": 256,  # Batch size for evaluation
     "lambda_std": 0.2,
-    "lambda_mrv": 0.8,
-    "lambda_hamming": 1,
+    "lambda_ce": 0.1,
+    "lambda_mrv": 0.0005,
+    "lambda_hamming": 0.2,
     "rdr_agreement_threshold": 0.7,
     "label_smoothing": 0.1,
 }

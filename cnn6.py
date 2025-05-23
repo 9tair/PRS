@@ -1,3 +1,6 @@
+import os
+import heapq
+import shutil
 import numpy as np
 import torch
 import torch.nn as nn
@@ -5,7 +8,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm  
 
-# Import utility functions
 from models import get_model
 from utils import (
     get_datasets, evaluate, compute_unique_activations, 
@@ -18,6 +20,10 @@ from config import config
 def train():
     set_seed(config["seed"])
     results = {}
+    top_k_models = []  # Min-heap for top 10 lowest PRS ratios
+    k = 10
+    temp_save_dir = "temp_checkpoints"
+    os.makedirs(temp_save_dir, exist_ok=True)
 
     for modelname in tqdm(config['models'], desc="Model Loop"):
         for dataset_name in tqdm(config["datasets"], desc="Dataset Loop"):
@@ -45,8 +51,6 @@ def train():
                 hook_handle = register_activation_hook(model, activations, modelname, dataset_name, batch_size, logger)
 
                 total_epochs = config["epochs"]
-                save_epochs = set(range(50, total_epochs + 1, 50))
-                save_epochs.add(total_epochs)
 
                 for epoch in tqdm(range(1, total_epochs + 1), desc=f"Training {dataset_name} | Batch {batch_size}"):
                     model.train()
@@ -61,8 +65,6 @@ def train():
 
                         outputs = model(inputs)
                         loss = criterion(outputs, labels)
-
-                        # Always collect activations and labels
                         batch_labels.append(labels.cpu().numpy())
 
                         if torch.isnan(loss).any():
@@ -91,7 +93,7 @@ def train():
                         prs_ratio = compute_unique_activations(all_activations, logger) / all_labels.shape[0]
                     else:
                         logger.warning("No activations collected this epoch — skipping PRS computation.")
-                        prs_ratio = 0
+                        prs_ratio = float('inf')
 
                     train_accuracy = 100 * correct_train / total_train if total_train > 0 else 0
                     test_accuracy = evaluate(model, test_loader, config["device"])
@@ -103,19 +105,27 @@ def train():
 
                     logger.info(f"Epoch {epoch}/{total_epochs} | Loss: {epoch_loss:.4f} | Train Acc: {train_accuracy:.2f}% | Test Acc: {test_accuracy:.2f}% | PRS: {prs_ratio:.4f} | Skipped Batches: {skipped_batches}")
 
-                    if epoch in save_epochs and activations["penultimate"]:
+                    if activations["penultimate"]:
                         major_regions, unique_patterns = compute_major_regions(all_activations, all_labels, num_classes=10, logger=logger)
+                        temp_path = os.path.join(temp_save_dir, f"{modelname}_{dataset_name}_bs{batch_size}_ep{epoch}.pt")
                         save_model_checkpoint(
                             model, optimizer, modelname, dataset_name, batch_size,
                             metrics, logger, config=config,
-                            extra_tag=None, epoch=epoch,
-                            major_regions=major_regions, unique_patterns=unique_patterns
+                            extra_tag="topPRS", epoch=epoch,
+                            major_regions=major_regions, unique_patterns=unique_patterns,
+                            save_path=temp_path
                         )
+                        heapq.heappush(top_k_models, (-prs_ratio, temp_path))
+                        if len(top_k_models) > k:
+                            _, worst_path = heapq.heappop(top_k_models)
+                            if os.path.exists(worst_path):
+                                os.remove(worst_path)
 
                 hook_handle.remove()
                 results[f"{dataset_name}_batch_{batch_size}"] = metrics
 
     logger.info("Training Complete")
+    logger.info("Top 10 models with lowest PRS saved.")
 
 if __name__ == "__main__":
     train()
