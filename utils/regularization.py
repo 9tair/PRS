@@ -43,6 +43,10 @@ def compute_mrv_loss(
 
                 if filtered_mrv.numel() == 0:
                     continue  # No valid values to compute loss
+                
+                if not torch.isfinite(filtered_activation).all() or not torch.isfinite(filtered_mrv).all():
+                    logger.warning(f"[MRV Loss] Skipping due to NaN/Inf in inputs for class {cls}")
+                    continue
 
                 sample_loss = F.mse_loss(filtered_activation, filtered_mrv, reduction='mean')
                 total_loss += sample_loss
@@ -97,3 +101,26 @@ def compute_hamming_loss(activations: torch.Tensor, labels: torch.Tensor,
     act_batch = torch.stack(valid_activations)
     pattern_batch = torch.stack(target_patterns)
     return F.mse_loss(act_batch, pattern_batch)
+
+def pals_loss(feats: torch.Tensor,
+              labels: torch.Tensor,
+              centroids: dict,
+              alpha: float = 0.1) -> torch.Tensor:
+    """
+    feats     – [B, D]   penultimate-layer features
+    labels    – [B]      ground-truth class indices
+    centroids – {class_id: 1-D tensor (D,)}
+    alpha     – same α you use for label-smoothing CE
+    """
+    if not centroids:
+        return feats.sum() * 0  # clean zero-grad tensor
+
+    # C×D stack of µ_c
+    μ = torch.stack([centroids[c] for c in sorted(centroids.keys())])        # [C, D]
+    dists = torch.cdist(feats, μ)                                           # [B, C]
+
+    own   = dists[torch.arange(feats.size(0), device=feats.device), labels] # [B]
+    other = (dists.sum(dim=1) - own) / (μ.size(0) - 1)                      # [B]
+
+    pals = ((1 - alpha) * own + alpha * other).mean()
+    return pals

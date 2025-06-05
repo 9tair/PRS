@@ -52,6 +52,9 @@ def load_checkpoint_if_exists(model, optimizer, modelname,
             logger.error(f"[Checkpoint Loader] Optimizer file missing: {optimizer_path}")
             return False, model, optimizer, None, None, None
         optimizer.load_state_dict(torch.load(optimizer_path, map_location=config.get("device", "cpu")))
+        logger.debug(f"[Checkpoint Debug] Model state dict keys (sample): {list(model.state_dict().keys())[:5]}")
+        logger.debug(f"[Checkpoint Debug] Optimizer param group count: {len(optimizer.param_groups)}")
+
 
         sched_state = None
         if os.path.exists(scheduler_path):
@@ -64,6 +67,8 @@ def load_checkpoint_if_exists(model, optimizer, modelname,
             return False, model, optimizer, None, None, None 
         with open(major_regions_path) as f:
             major_regions = json.load(f)
+            
+        sanitize_major_regions(major_regions, logger)
 
         unique_patterns = None
         if os.path.exists(unique_patterns_path):
@@ -79,6 +84,28 @@ def load_checkpoint_if_exists(model, optimizer, modelname,
         logger.error(f"[Checkpoint Loader] Checkpoint load failed with exception: {e}", exc_info=True)
         return False, model, optimizer, None, None, None
 
+def sanitize_major_regions(major_regions, logger, max_norm=100.0):
+    """
+    Clip and sanitize MRVs to prevent unstable training during PRS phase.
+    """
+    for cls_key, entry in major_regions.items():
+        mrv = entry.get("mrv", None)
+        if mrv is None:
+            logger.warning(f"[MRV Sanity] Missing MRV for {cls_key}.")
+            continue
+
+        mrv = np.array(mrv)
+
+        if not np.isfinite(mrv).all():
+            logger.warning(f"[MRV Sanity] MRV for {cls_key} has NaN/Inf. Zeroing.")
+            mrv = np.zeros_like(mrv)
+
+        norm = np.linalg.norm(mrv)
+        if norm > max_norm:
+            logger.warning(f"[MRV Sanity] MRV for {cls_key} norm={norm:.2f} too large. Clipping.")
+            mrv = mrv / norm * max_norm
+
+        major_regions[cls_key]["mrv"] = mrv
 
 # ──────────────────────────────────────────────────────────────────────────
 #  main routine
@@ -109,6 +136,9 @@ def train():
         num_classes = num_classes_val
 
         logger.info(f"[Data Setup] Training samples: {len(train_ds)}, Test samples: {len(test_ds)}, Input channels: {in_ch}, Num classes: {num_classes}")
+        sample_input, sample_label = train_ds[0]
+        logger.debug(f"[Dataset Sample] Input shape: {sample_input.shape}, Label: {sample_label}")
+
         
         train_loader = DataLoader(
             train_ds, batch_size, shuffle=True,
@@ -118,6 +148,17 @@ def train():
         test_loader  = DataLoader(test_ds, config.get("test_batch_size", batch_size), shuffle=False)
         
         model = get_model(modelname, in_ch, num_classes=num_classes).to(config.get("device", "cpu"))
+        
+        for n, p in model.named_parameters():
+            if not torch.isfinite(p).all():
+                logger.error(f"[Sanity] parameter {n} contains NaN / Inf!")
+                
+        use_amp = False                           # disable autocast
+        scaler  = torch.amp.GradScaler(enabled=False)   # disable GradScaler
+        logger.info("[Patch] AMP disabled – running in pure FP32 for this trial")
+
+        logger.debug(f"[Model Summary] Architecture:\n{model}")
+
         
         optimizer = optim.Adam(model.parameters(), lr=config.get("learning_rate", 0.001))
         criterion = nn.CrossEntropyLoss()
@@ -145,9 +186,20 @@ def train():
         resumed, model, optimizer, loaded_sched_state, major_regions_loaded, unique_patterns_loaded = load_checkpoint_if_exists(
             model, optimizer, modelname, dataset_name, batch_size, logger
         )
+        
+        max_abs_param = max(p.abs().max().item() for p in model.parameters())
+        logger.info(f"[Sanity] Largest |param| in checkpoint = {max_abs_param:.1f}")
 
         if resumed:
             major_regions = major_regions_loaded
+            logger.info("[DEBUG] Checking MRV values...")
+            for cls, data in major_regions.items():
+                mrv = np.array(data['mrv'])
+                if not np.all(np.isfinite(mrv)):
+                    logger.error(f"[DEBUG] MRV for class {cls} contains non-finite values: {mrv}")
+                elif np.linalg.norm(mrv) > 1e4:
+                    logger.error(f"[DEBUG] MRV for class {cls} norm too large: {np.linalg.norm(mrv):.2f}")
+
             logger.info("[Resuming] Successfully resumed from checkpoint.")
             if loaded_sched_state:
                 scheduler.load_state_dict(loaded_sched_state)
@@ -180,6 +232,11 @@ def train():
                     inp, lbl = inp.to(config.get("device", "cpu")), lbl.to(config.get("device", "cpu"))
                     optimizer.zero_grad(set_to_none=True)
                     activations["current"] = None 
+                    if activations["current"] is not None:
+                        logger.debug(f"[Activations] Hook captured tensor with shape: {activations['current'].shape}")
+                    else:
+                        logger.warning("[Activations] Hook failed to capture tensor. Check model/hook.")
+
 
                     with torch.amp.autocast(device_type=config.get("device", "cpu").split(':')[0], enabled=use_amp):
                         out  = model(inp)
@@ -269,6 +326,12 @@ def train():
             logger.info(f"[PRS Setup] Freezing final layer for '{modelname}'...")
             freeze_final_layer(model, modelname, logger)
             
+            logger.debug("[DEBUG] Final layer parameters freeze status:")
+            for name, param in model.named_parameters():
+                if 'classifier.6' in name:
+                    logger.debug(f"  Param: {name}, requires_grad: {param.requires_grad}")
+
+            
             unfrozen_params = [p for p in model.parameters() if p.requires_grad]
             optimizer = optim.Adam(unfrozen_params if unfrozen_params else model.parameters(), # Fallback if all frozen
                                    lr=config.get("learning_rate_prs", config.get("learning_rate", 0.001)))
@@ -291,50 +354,50 @@ def train():
         for epoch in range(start_prs_epoch, total_ep):
             epoch_num_display = epoch + 1
             logger.info(f"--- PRS Epoch {epoch_num_display}/{total_ep} (Overall {epoch_num_display}) ---")
+            if config.get("recompute_mr", False):
+                if activations_from_last_full_epoch_for_mrv and labels_from_last_full_epoch_for_mrv:
+                    logger.debug(f"PRS E{epoch_num_display} MRV Recomp: Using {len(activations_from_last_full_epoch_for_mrv)} act batches & {len(labels_from_last_full_epoch_for_mrv)} label batches from prev epoch.")
+                    try:
+                        if not activations_from_last_full_epoch_for_mrv or not all(isinstance(t, torch.Tensor) for t in activations_from_last_full_epoch_for_mrv):
+                            raise ValueError("Prev epoch activations list empty or contains non-tensors.")
+                        
+                        acts_np_prev_epoch = torch.cat(activations_from_last_full_epoch_for_mrv).cpu().numpy()
+                        lbls_np_prev_epoch = np.concatenate(labels_from_last_full_epoch_for_mrv)
+                        
+                        logger.debug(f"[PRS Epoch {epoch_num_display}] Prev acts shape: {acts_np_prev_epoch.shape}")
+                        logger.debug(f"[PRS Epoch {epoch_num_display}] Label set: {np.unique(lbls_np_prev_epoch)}")
+                        
+                        logger.info(f"PRS E{epoch_num_display} MRV Recomp: Acts samples: {len(acts_np_prev_epoch)}, Labels samples: {len(lbls_np_prev_epoch)}")
 
-            if activations_from_last_full_epoch_for_mrv and labels_from_last_full_epoch_for_mrv:
-                logger.debug(f"PRS E{epoch_num_display} MRV Recomp: Using {len(activations_from_last_full_epoch_for_mrv)} act batches & {len(labels_from_last_full_epoch_for_mrv)} label batches from prev epoch.")
-                try:
-                    if not activations_from_last_full_epoch_for_mrv or not all(isinstance(t, torch.Tensor) for t in activations_from_last_full_epoch_for_mrv):
-                        raise ValueError("Prev epoch activations list empty or contains non-tensors.")
-                    
-                    acts_np_prev_epoch = torch.cat(activations_from_last_full_epoch_for_mrv).cpu().numpy()
-                    lbls_np_prev_epoch = np.concatenate(labels_from_last_full_epoch_for_mrv)
-                    
-                    logger.info(f"PRS E{epoch_num_display} MRV Recomp: Acts samples: {len(acts_np_prev_epoch)}, Labels samples: {len(lbls_np_prev_epoch)}")
-
-                    if len(acts_np_prev_epoch) == len(lbls_np_prev_epoch) and len(acts_np_prev_epoch) > 0:
-                        major_regions, _ = compute_major_regions(
-                            acts_np_prev_epoch, lbls_np_prev_epoch, num_classes=num_classes, logger=logger
-                        )
-                        logger.info(f"PRS E{epoch_num_display} Recomputed MRs. Num classes in MR: {len(major_regions) if major_regions else 'None'}")
-                    else:
-                        logger.warning(f"PRS E{epoch_num_display} Mismatch/empty for MR recomp. Acts:{len(acts_np_prev_epoch)}, Lbls:{len(lbls_np_prev_epoch)}. Using previous MRs.")
-                except Exception as e:
-                    logger.error(f"PRS E{epoch_num_display} Error recomputing MRs: {e}. Using previous MRs.", exc_info=True)
-            elif major_regions is None and not resumed : 
-                 logger.warning(f"PRS E{epoch_num_display} No acts/labels from prev epoch AND no initial MRs. MRV/HAM loss will be 0.")
-            elif epoch > start_prs_epoch : # Not first PRS epoch, but still missing data
-                 logger.warning(f"PRS E{epoch_num_display} No acts or labels from previous PRS epoch to recompute MRs. Using existing MRs.")
+                        if len(acts_np_prev_epoch) == len(lbls_np_prev_epoch) and len(acts_np_prev_epoch) > 0:
+                            major_regions, _ = compute_major_regions(
+                                acts_np_prev_epoch, lbls_np_prev_epoch, num_classes=num_classes, logger=logger
+                            )
+                            logger.info(f"PRS E{epoch_num_display} Recomputed MRs. Num classes in MR: {len(major_regions) if major_regions else 'None'}")
+                            if major_regions:
+                                for c, info in major_regions.items():
+                                    mrv_vec = np.array(info["mrv"])
+                                    # take the first 10 non-zero elements (or fewer if vector is sparse)
+                                    nz_vals   = mrv_vec[mrv_vec != 0]
+                                    preview   = nz_vals[:10] if nz_vals.size else []
+                                    logger.info(
+                                        f"[MRV-Preview][cls={c:2}] len={len(mrv_vec):4d} "
+                                        f"non-zeros={nz_vals.size:4d}  first_nz={preview}"
+                                    )
+                        else:
+                            logger.warning(f"PRS E{epoch_num_display} Mismatch/empty for MR recomp. Acts:{len(acts_np_prev_epoch)}, Lbls:{len(lbls_np_prev_epoch)}. Using previous MRs.")
+                    except Exception as e:
+                        logger.error(f"PRS E{epoch_num_display} Error recomputing MRs: {e}. Using previous MRs.", exc_info=True)
+                elif major_regions is None and not resumed : 
+                    logger.warning(f"PRS E{epoch_num_display} No acts/labels from prev epoch AND no initial MRs. MRV/HAM loss will be 0.")
+                elif epoch > start_prs_epoch : # Not first PRS epoch, but still missing data
+                    logger.warning(f"PRS E{epoch_num_display} No acts or labels from previous PRS epoch to recompute MRs. Using existing MRs.")
 
             model.train()
             current_epoch_batch_activations = [] # Reset for the current PRS epoch
             current_epoch_batch_labels = []      # Reset for the current PRS epoch
             activations["skip_batch"] = False
 
-            # ... (rest of the PRS epoch batch loop, loss calculation, metrics, saving) ...
-            # IMPORTANT: Inside the batch loop of PRS epoch:
-            #   current_epoch_batch_labels.append(lbl.cpu().numpy())
-            #   if activations["current"] is not None:
-            #        current_epoch_batch_activations.append(activations["current"].detach().cpu())
-            #   else: logger.warning(...)
-            #
-            # At the END of the PRS epoch batch loop (before metrics_prs.append):
-            #   labels_from_last_full_epoch_for_mrv = current_epoch_batch_labels
-            #   activations_from_last_full_epoch_for_mrv = current_epoch_batch_activations
-            # This ensures the *next* PRS epoch uses the data from *this* completed PRS epoch.
-
-            # --- START OF PRS EPOCH BATCH LOOP (Example of how it should look) ---
             current_epoch_total_ce_loss = 0.0; current_epoch_total_mrv_loss = 0.0; current_epoch_total_ham_loss = 0.0; current_epoch_total_combined_loss = 0.0
             correct_preds_epoch = 0; total_samples_epoch = 0
 
@@ -344,48 +407,75 @@ def train():
                 optimizer.zero_grad(set_to_none=True)
 
                 with torch.amp.autocast(device_type=config.get("device", "cpu").split(':')[0], enabled=use_amp):
-                    out  = model(inp)
-                    ce_loss_batch   = criterion(out, lbl)
-                
-                if not torch.isfinite(ce_loss_batch): logger.error(f"PRS E{epoch_num_display} B{batch_idx+1} CE loss NaN/Inf. Skip."); continue
+                    out = model(inp)
+                    logits = out.detach()
+                    if not torch.isfinite(logits).all():
+                        logger.error("[DEBUG] Non-finite logits detected before CE loss!")
+                    logger.debug(f"[DEBUG] Logits stats - min: {logits.min().item():.4f}, max: {logits.max().item():.4f}, mean: {logits.mean().item():.4f}")
 
-                combined_loss_batch  = config.get('lambda_ce', 1.0) * ce_loss_batch
-                mrv_loss_batch = torch.tensor(0.0, device=combined_loss_batch.device, dtype=combined_loss_batch.dtype)
-                ham_loss_batch = torch.tensor(0.0, device=combined_loss_batch.device, dtype=combined_loss_batch.dtype)
+                    ce_loss_batch = criterion(out, lbl)
 
-                if activations["current"] is not None:
-                    if major_regions:
-                        mrv_loss_batch = compute_mrv_loss(activations["current"], lbl, major_regions, logger)
-                        ham_loss_batch = compute_hamming_loss(activations["current"], lbl, major_regions, logger)
+                if not torch.isfinite(ce_loss_batch):
+                    logger.error(f"[PRS E{epoch_num_display} B{batch_idx+1}] CE loss NaN/Inf. Skipping batch.")
+                    continue
 
-                        if not torch.isfinite(mrv_loss_batch): mrv_loss_batch = torch.tensor(0.0, device=mrv_loss_batch.device, dtype=mrv_loss_batch.dtype, requires_grad=True)
-                        if not torch.isfinite(ham_loss_batch): ham_loss_batch = torch.tensor(0.0, device=ham_loss_batch.device, dtype=ham_loss_batch.dtype, requires_grad=True)
-                        
-                        combined_loss_batch = combined_loss_batch + \
-                                              config.get("lambda_mrv", 0.0) * mrv_loss_batch + \
-                                              config.get("lambda_hamming", 0.0) * ham_loss_batch
-                    elif config.get("lambda_mrv",0)>0 or config.get("lambda_hamming",0)>0: logger.warning(f"PRS E{epoch_num_display} B{batch_idx+1} MRs None. MRV/HAM zero.")
-                elif config.get("lambda_mrv",0)>0 or config.get("lambda_hamming",0)>0: logger.warning(f"PRS E{epoch_num_display} B{batch_idx+1} Hook fail. MRV/HAM zero.")
-                
-                if not torch.isfinite(combined_loss_batch): logger.error(f"PRS E{epoch_num_display} B{batch_idx+1} Combined loss NaN/Inf. Skip backward."); continue
+                # Early activation check
+                if activations["current"] is None:
+                    logger.warning(f"[PRS E{epoch_num_display} B{batch_idx+1}] Activation is None. Skipping batch.")
+                    continue
+                else:
+                    acts = activations["current"].detach()
+                    logger.debug(f"[DEBUG] Activations stats - min: {acts.min().item():.4f}, max: {acts.max().item():.4f}, mean: {acts.mean().item():.4f}")
+                    if not torch.isfinite(acts).all():
+                        logger.error("[DEBUG] Non-finite activations detected!")
+
+                combined_loss_batch = config.get('lambda_ce', 1.0) * ce_loss_batch
+                mrv_loss_batch = torch.tensor(0.0, device=combined_loss_batch.device)
+                ham_loss_batch = torch.tensor(0.0, device=combined_loss_batch.device)
+
+                if major_regions:
+                    mrv_loss_batch = compute_mrv_loss(activations["current"], lbl, major_regions, logger)
+                    ham_loss_batch = compute_hamming_loss(activations["current"], lbl, major_regions, logger)
+
+                    logger.debug(f"[Losses B{batch_idx+1}] CE={ce_loss_batch.item():.4f} MRV={mrv_loss_batch.item():.4f} HAM={ham_loss_batch.item():.4f}")
+
+                    if not torch.isfinite(mrv_loss_batch): mrv_loss_batch = torch.tensor(0.0, device=mrv_loss_batch.device)
+                    if not torch.isfinite(ham_loss_batch): ham_loss_batch = torch.tensor(0.0, device=ham_loss_batch.device)
+
+                    combined_loss_batch += config.get("lambda_mrv", 0.0) * mrv_loss_batch + config.get("lambda_hamming", 0.0) * ham_loss_batch
+
+                if not torch.isfinite(combined_loss_batch):
+                    logger.error(f"[Loss B{batch_idx+1}] Combined loss NaN/Inf. Skipping batch.")
+                    continue
 
                 scaler.scale(combined_loss_batch).backward()
-                if use_amp: scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config.get("grad_clip_norm", 1.0))
+                if use_amp:
+                    scaler.unscale_(optimizer)
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        grad_norm = param.grad.norm().item()
+                        if not np.isfinite(grad_norm):
+                            logger.error(f"[Gradient NaN] {name} has invalid grad norm!")
+                        elif grad_norm > 100:
+                            logger.warning(f"[High Gradient] {name} grad norm={grad_norm:.2f}")
+
+
+
                 scaler.step(optimizer)
                 scaler.update()
 
+                # Update metrics
                 current_epoch_total_ce_loss += ce_loss_batch.item() * inp.size(0)
                 current_epoch_total_mrv_loss += mrv_loss_batch.item() * inp.size(0)
                 current_epoch_total_ham_loss += ham_loss_batch.item() * inp.size(0)
                 current_epoch_total_combined_loss += combined_loss_batch.item() * inp.size(0)
-                correct_preds_epoch += (out.argmax(1) == lbl).sum().item(); total_samples_epoch += lbl.size(0)
+                correct_preds_epoch += (out.argmax(1) == lbl).sum().item()
+                total_samples_epoch += lbl.size(0)
 
-                                # Store activations *after* loss computation to preserve gradients
-                if activations["current"] is not None:
-                    current_epoch_batch_activations.append(activations["current"].detach().cpu())
-
+                # Save activations for MRV recomputation
                 current_epoch_batch_labels.append(lbl.cpu().numpy())
+                current_epoch_batch_activations.append(activations["current"].detach().cpu())
+
             # --- END OF PRS EPOCH BATCH LOOP ---
 
             labels_from_last_full_epoch_for_mrv = current_epoch_batch_labels
@@ -408,6 +498,7 @@ def train():
                         if len(acts_np_prs_epoch) > 0:
                             unique_acts_count_prs = compute_unique_activations(acts_np_prs_epoch, logger)
                             current_epoch_prs_value = unique_acts_count_prs / len(train_ds) if len(train_ds) > 0 else 0.0
+                            logger.debug(f"[PRS Metric] Unique activations: {unique_acts_count_prs}, Dataset size: {len(train_ds)}, PRS ratio: {current_epoch_prs_value:.4f}")
                 except Exception as e: logger.error(f"PRS E{epoch_num_display} Error processing acts for PRS: {e}", exc_info=True)
             
             activations["skip_batch"] = True
@@ -437,7 +528,7 @@ def train():
                 save_model_checkpoint(
                     model=model, optimizer=optimizer, scheduler=scheduler, modelname=modelname, dataset_name=dataset_name,
                     batch_size=batch_size, metrics=metrics_prs, logger=logger, config=config, epoch=epoch_num_display,
-                    prs_enabled=True, major_regions=major_regions, unique_patterns=unique_patterns_to_save
+                    prs_enabled=True, major_regions=major_regions, unique_patterns=unique_patterns_to_save, extra_tag="recomputation"
                 )
         
         if hook_handle: hook_handle.remove()

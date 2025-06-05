@@ -21,7 +21,7 @@ def train():
     results = {}
     
     # Add this to config or define it here
-    TOP_K_PRS_SAVE = config.get("top_k_prs_save", 10) # Number of top models to save by PRS
+    TOP_K_PRS_SAVE = config.get("top_k_prs_save", 5) # Number of top models to save by PRS
 
     for modelname in tqdm(config['models'], desc="Model Loop"):
         for dataset_name in tqdm(config["datasets"], desc="Dataset Loop"):
@@ -54,7 +54,7 @@ def train():
 
                 model = get_model(modelname, input_channels).to(config["device"])
                 optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
-                criterion = nn.CrossEntropyLoss()
+                criterion = nn.CrossEntropyLoss(label_smoothing=config.get("label_smoothing", 0.1))
 
                 metrics_history = {"epoch": [], "train_accuracy": [], "test_accuracy": [], "prs_ratios": []}
                 activations = {"penultimate": [], "skip_batch": False}
@@ -135,7 +135,12 @@ def train():
 
                     # Manage top K PRS models
                     # Only consider if PRS was computable (i.e., activations were collected)
-                    if all_activations_this_epoch is not None and all_labels_this_epoch is not None:
+                    if (
+                        all_activations_this_epoch is not None and 
+                        all_labels_this_epoch is not None and
+                        train_accuracy >= 70.0 and 
+                        test_accuracy >= 70.0
+                    ):
                         # Store necessary data, deepcopy states to prevent modification by subsequent training
                         model_state = copy.deepcopy(model.state_dict())
                         optimizer_state = copy.deepcopy(optimizer.state_dict())
@@ -196,7 +201,7 @@ def train():
                         saved_epoch_metrics, # Pass metrics for this specific epoch
                         logger,
                         config=config,
-                        extra_tag=f"top_prs_rank{rank+1}", # Tag to identify its rank
+                        extra_tag=f"norm_ls_top_prs_rank{rank+1}", # Tag to identify its rank
                         epoch=saved_epoch, # The actual epoch number of this saved model
                         major_regions=major_regions,
                         unique_patterns=unique_patterns

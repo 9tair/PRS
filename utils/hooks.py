@@ -33,11 +33,10 @@ def register_activation_hook(
         if out.dim() > 2:
             out = torch.flatten(out, 1)
 
-        out_detached = out.detach()          # still on CUDA
-        activations["current"] = out_detached   # used immediately for the loss
+        activations["current"] = out   # used immediately for the loss
 
         # store a *CPU* copy for later concatenation / MR computation
-        activations["penultimate"].append(out_detached.cpu())
+        activations["penultimate"].append(out.detach().cpu())
 
     # ----------------------------------------------------------------------
     if model_name == "VGG16":

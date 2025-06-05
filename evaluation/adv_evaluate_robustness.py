@@ -334,7 +334,20 @@ def evaluate_robustness_with_samples(
         else: 
             if epsilon_for_attack_func is None:
                 raise ValueError(f"Epsilon for attack function is None for {current_attack_name}.")
-            adv_batch_inputs = attack_fn_to_use(model_to_attack, current_batch_inputs, batch_labels, epsilon=epsilon_for_attack_func, **effective_attack_params).detach()
+            adv_batch_inputs = attack_fn_to_use(
+                model_to_attack,
+                current_batch_inputs,
+                batch_labels,
+                # ------- required -------
+                epsilon=epsilon_for_attack_func,
+                mean=dataset_mean_for_scaling,
+                std=dataset_std_for_scaling,
+                # ------- optional (will be ignored if not relevant) -------
+                alpha=effective_attack_params.get("alpha"),
+                num_iter=effective_attack_params.get("num_iter"),
+                restarts=effective_attack_params.get("restarts", 5),
+            ).detach()
+
 
         with torch.no_grad():
             adv_outputs = model_to_attack(adv_batch_inputs)

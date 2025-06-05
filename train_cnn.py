@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from tqdm import tqdm  
 
 # Import utility functions
 from models import get_model
@@ -12,9 +12,8 @@ from utils import (
     register_activation_hook, compute_major_regions,
     save_model_checkpoint, set_seed
 )
-from utils.logger import setup_logger
+from utils.logger import setup_logger  
 from config import config
-
 
 def train():
     set_seed(config["seed"])
@@ -38,8 +37,7 @@ def train():
 
                 model = get_model(modelname, input_channels).to(config["device"])
                 optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
-
-                # Use label smoothing if configured
+                
                 smoothing = config.get("label_smoothing", 0.0)
                 criterion = nn.CrossEntropyLoss(label_smoothing=smoothing)
 
@@ -105,20 +103,14 @@ def train():
                     metrics["test_accuracy"].append(test_accuracy)
                     metrics["prs_ratios"].append(prs_ratio)
 
-                    logger.info(
-                        f"Epoch {epoch}/{total_epochs} | Loss: {epoch_loss:.4f} | Train Acc: {train_accuracy:.2f}% | "
-                        f"Test Acc: {test_accuracy:.2f}% | PRS: {prs_ratio:.4f} | Skipped Batches: {skipped_batches}"
-                    )
+                    logger.info(f"Epoch {epoch}/{total_epochs} | Loss: {epoch_loss:.4f} | Train Acc: {train_accuracy:.2f}% | Test Acc: {test_accuracy:.2f}% | PRS: {prs_ratio:.4f} | Skipped Batches: {skipped_batches}")
 
                     if epoch in save_epochs and activations["penultimate"]:
-                        major_regions, unique_patterns = compute_major_regions(
-                            all_activations, all_labels, num_classes=10, logger=logger
-                        )
-                        tag = "_norm_ls" if smoothing > 0 else None
+                        major_regions, unique_patterns = compute_major_regions(all_activations, all_labels, num_classes=10, logger=logger)
                         save_model_checkpoint(
                             model, optimizer, modelname, dataset_name, batch_size,
                             metrics, logger, config=config,
-                            extra_tag=tag, epoch=epoch,
+                            extra_tag="FOR_VISUAL_LS", epoch=epoch,
                             major_regions=major_regions, unique_patterns=unique_patterns
                         )
 
@@ -126,7 +118,6 @@ def train():
                 results[f"{dataset_name}_batch_{batch_size}"] = metrics
 
     logger.info("Training Complete")
-
 
 if __name__ == "__main__":
     train()
